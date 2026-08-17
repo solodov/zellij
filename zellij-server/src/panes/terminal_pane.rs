@@ -770,6 +770,10 @@ impl Pane for TerminalPane {
         self.active_at
     }
 
+    fn command_running_since(&self) -> Option<Instant> {
+        self.grid.osc133_command_running_since()
+    }
+
     fn set_active_at(&mut self, time: Instant) {
         self.active_at = time;
     }

@@ -4260,6 +4260,25 @@ fn osc133_running_command_without_end_boundary_falls_back_to_logical_line_select
 }
 
 #[test]
+fn osc133_command_running_state_updates_without_visible_row() {
+    let mut grid = create_grid_with_content("");
+    let mut vte_parser = vte::Parser::new();
+    grid.viewport.clear();
+
+    vte_parser.advance(&mut grid, b"\x1b]133;C\x07");
+    assert!(grid.osc133_command_running_since().is_some());
+
+    vte_parser.advance(&mut grid, b"\x1b]133;D\x07");
+    assert!(grid.osc133_command_running_since().is_none());
+
+    vte_parser.advance(&mut grid, b"\x1b]133;C\x07");
+    assert!(grid.osc133_command_running_since().is_some());
+
+    vte_parser.advance(&mut grid, b"\x1b]133;B\x07");
+    assert!(grid.osc133_command_running_since().is_none());
+}
+
+#[test]
 fn osc133_command_becomes_selectable_once_its_end_boundary_arrives() {
     let mut grid =
         create_grid_with_content("\x1b]133;A\x07$ \x1b]133;B\x07sleep\x1b]133;C\x07\r\npartial");

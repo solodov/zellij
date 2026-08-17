@@ -375,6 +375,9 @@ pub trait Pane {
     fn clear_scroll(&mut self);
     fn is_scrolled(&self) -> bool;
     fn active_at(&self) -> Instant;
+    fn command_running_since(&self) -> Option<Instant> {
+        None
+    }
     fn set_active_at(&mut self, instant: Instant);
     fn set_frame(&mut self, frame: bool);
     fn set_content_offset(&mut self, offset: Offset);

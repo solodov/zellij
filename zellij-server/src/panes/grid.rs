@@ -24,6 +24,7 @@ use std::{
     collections::{BTreeSet, VecDeque},
     fmt::{self, Debug, Formatter},
     str,
+    time::Instant,
 };
 
 use vte;
@@ -923,6 +924,7 @@ pub struct Grid {
     pub hover_position: Option<Position>, // pane-relative cursor cell; None when outside pane
     pub cached_hover_tooltip: Option<String>,
     osc133_markers_seen: bool,
+    osc133_command_running_since: Option<Instant>,
     osc133_command_selection: bool,
     command_output_flash: Option<Selection>,
     word_separators: String,
@@ -1296,6 +1298,7 @@ impl Grid {
             hover_position: None,
             cached_hover_tooltip: None,
             osc133_markers_seen: false,
+            osc133_command_running_since: None,
             osc133_command_selection: true,
             command_output_flash: None,
             word_separators: DEFAULT_WORD_SEPARATORS.to_owned(),
@@ -1307,6 +1310,38 @@ impl Grid {
             self.word_separators = word_separators.to_owned();
         }
     }
+    /// Return when the current OSC 133 command-output phase began, if any.
+    pub fn osc133_command_running_since(&self) -> Option<Instant> {
+        self.osc133_command_running_since
+    }
+
+    /// Parse OSC 133 shell-integration markers for command selection and busy state.
+    fn handle_osc133_marker(&mut self, params: &[&[u8]]) {
+        let Some(marker) = osc133_marker_kind(params) else {
+            return;
+        };
+        self.update_osc133_command_running_state(marker);
+        if let Some(row) = self.viewport.get_mut(self.cursor.y) {
+            row.add_osc133_marker(self.cursor.x, marker);
+            self.osc133_markers_seen = true;
+        }
+    }
+
+    /// Track command-running state from OSC 133 lifecycle boundaries.
+    fn update_osc133_command_running_state(&mut self, marker: Osc133MarkerKind) {
+        match marker {
+            Osc133MarkerKind::Output => {
+                self.osc133_command_running_since
+                    .get_or_insert_with(Instant::now);
+            },
+            // An input marker means the shell is accepting a new command, so stale
+            // running state should be cleared even if a previous end marker was missed.
+            Osc133MarkerKind::Prompt | Osc133MarkerKind::Input | Osc133MarkerKind::End(_) => {
+                self.osc133_command_running_since = None;
+            },
+        }
+    }
+
     pub fn render_full_viewport(&mut self) {
         self.output_buffer.update_all_lines();
     }
@@ -2840,6 +2875,7 @@ impl Grid {
         self.pane_default_fg = None;
         self.pane_default_bg = None;
         self.osc133_markers_seen = false;
+        self.osc133_command_running_since = None;
         if let Some(images_to_reap) = self.sixel_grid.clear() {
             self.sixel_grid.reap_images(images_to_reap);
         }
@@ -4806,22 +4842,7 @@ impl Perform for Grid {
             },
 
             b"133" => {
-                let marker = params.get(1).and_then(|subcommand| match *subcommand {
-                    b"A" | b"P" => Some(Osc133MarkerKind::Prompt),
-                    b"B" | b"I" => Some(Osc133MarkerKind::Input),
-                    b"C" => Some(Osc133MarkerKind::Output),
-                    b"D" => Some(Osc133MarkerKind::End(
-                        params
-                            .get(2)
-                            .and_then(|exit_code| std::str::from_utf8(exit_code).ok())
-                            .and_then(|exit_code| exit_code.trim().parse::<i32>().ok()),
-                    )),
-                    _ => None,
-                });
-                if let (Some(marker), Some(row)) = (marker, self.viewport.get_mut(self.cursor.y)) {
-                    row.add_osc133_marker(self.cursor.x, marker);
-                    self.osc133_markers_seen = true;
-                }
+                self.handle_osc133_marker(params);
             },
 
             // Set cursor style.
@@ -5821,6 +5842,21 @@ pub struct Row {
     width: Option<usize>,
     pub bg_color: Option<AnsiCode>,
     osc133_markers: Vec<Osc133Marker>,
+}
+
+fn osc133_marker_kind(params: &[&[u8]]) -> Option<Osc133MarkerKind> {
+    match *params.get(1)? {
+        b"A" | b"P" => Some(Osc133MarkerKind::Prompt),
+        b"B" | b"I" => Some(Osc133MarkerKind::Input),
+        b"C" => Some(Osc133MarkerKind::Output),
+        b"D" => Some(Osc133MarkerKind::End(
+            params
+                .get(2)
+                .and_then(|exit_code| std::str::from_utf8(exit_code).ok())
+                .and_then(|exit_code| exit_code.trim().parse::<i32>().ok()),
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
