@@ -9189,6 +9189,34 @@ fn clipboard_read_is_forwarded_asynchronously_when_enabled() {
 }
 
 #[test]
+fn middle_click_paste_reads_host_clipboard_and_pastes_reply() {
+    let size = Size { cols: 80, rows: 20 };
+    let (mut screen, capture) = create_new_screen_with_forward_capture(size);
+    let pane_id = PaneId::Terminal(1);
+
+    let token = screen.paste_from_host_clipboard(pane_id);
+
+    let expected_query = super::host_clipboard_paste_request_bytes(super::host_paste_selection());
+    assert_eq!(
+        capture.drain_forward_queries_with_async(),
+        vec![(token, expected_query, true)]
+    );
+
+    screen
+        .handle_forwarded_reply_from_host(token, b"hello".to_vec())
+        .expect("handler must not fail");
+
+    assert_eq!(
+        capture.drain_pty_writes(),
+        vec![
+            (b"\x1b[200~".to_vec(), 1),
+            (b"hello".to_vec(), 1),
+            (b"\x1b[201~".to_vec(), 1),
+        ]
+    );
+}
+
+#[test]
 fn a_pending_clipboard_read_does_not_block_other_host_queries() {
     let size = Size { cols: 80, rows: 20 };
     let (mut screen, capture) = create_new_screen_with_forward_capture(size);

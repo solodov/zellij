@@ -168,6 +168,9 @@ enum MouseAction {
         pane_id: PaneId,
         position: Position,
     },
+    PasteFromHostClipboard {
+        pane_id: PaneId,
+    },
     ResizeScrollUp {
         pane_id: PaneId,
     },
@@ -801,6 +804,13 @@ impl MouseHandler {
                         .with_context(err_context)?;
                 }
                 Ok(MouseEffect::default())
+            },
+            MouseAction::PasteFromHostClipboard { pane_id } => {
+                tab.focus_pane_with_id(pane_id, false, false, client_id)?;
+                tab.senders
+                    .send_to_screen(ScreenInstruction::PasteFromHostClipboard(pane_id))
+                    .with_context(err_context)?;
+                Ok(MouseEffect::state_changed())
             },
             MouseAction::FocusPaneAndClickThrough {
                 pane_id: _,
@@ -1579,14 +1589,22 @@ impl MouseHandler {
         }
 
         if event.middle {
-            let Some(pane_id) = ctx.pane_id_at_position else {
+            let Some(details) = &ctx.clicked_pane else {
                 return Ok(MouseAction::NoAction);
             };
-            let is_active_pane = Some(pane_id) == ctx.active_pane_id;
-            if is_active_pane {
-                return Ok(MouseAction::SendToTerminal {
-                    pane_id,
-                    event: *event,
+            let is_active_pane = Some(details.pane_id) == ctx.active_pane_id;
+            if details.terminal_wants_mouse {
+                if is_active_pane {
+                    return Ok(MouseAction::SendToTerminal {
+                        pane_id: details.pane_id,
+                        event: *event,
+                    });
+                }
+            } else if event.event_type == MouseEventType::Press
+                && matches!(details.pane_id, PaneId::Terminal(_))
+            {
+                return Ok(MouseAction::PasteFromHostClipboard {
+                    pane_id: details.pane_id,
                 });
             }
             return Ok(MouseAction::NoAction);
@@ -1992,6 +2010,80 @@ mod tests {
             MouseAction::PlumbText {
                 pane_id: PaneId::Terminal(1),
                 position,
+            }
+        );
+    }
+
+    #[test]
+    fn middle_click_active_pane_content_pastes_when_terminal_does_not_want_mouse() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_middle_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::PasteFromHostClipboard {
+                pane_id: PaneId::Terminal(1),
+            }
+        );
+    }
+
+    #[test]
+    fn middle_click_inactive_pane_content_pastes_when_terminal_does_not_want_mouse() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.active_pane_id = Some(PaneId::Terminal(2));
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_middle_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::PasteFromHostClipboard {
+                pane_id: PaneId::Terminal(1),
+            }
+        );
+    }
+
+    #[test]
+    fn middle_click_active_pane_content_forwards_when_terminal_wants_mouse() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let event = MouseEvent::new_middle_press_event(position);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_floating: false,
+            terminal_wants_mouse: true,
+        });
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::SendToTerminal {
+                pane_id: PaneId::Terminal(1),
+                event,
             }
         );
     }
