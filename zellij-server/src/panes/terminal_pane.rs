@@ -8,6 +8,7 @@ use crate::panes::{
     grid::{Grid, PendingNotification},
     nested_session_modal::GuestModalShortcuts,
     terminal_character::{render_first_run_banner, TerminalCharacter, EMPTY_TERMINAL_CHARACTER},
+    TextPlumbPayload,
 };
 use crate::pty::VteBytes;
 use crate::route::NotificationEnd;
@@ -953,6 +954,14 @@ impl Pane for TerminalPane {
 
     fn get_selected_text(&self, _client_id: ClientId) -> Option<String> {
         self.grid.get_selected_text()
+    }
+
+    fn link_uri_at(&self, position: &Position) -> Option<String> {
+        self.grid.link_uri_at(position)
+    }
+
+    fn text_for_plumbing_at(&self, position: &Position) -> Option<TextPlumbPayload> {
+        self.grid.text_for_plumbing_at(position)
     }
 
     fn set_frame(&mut self, _frame: bool) {

@@ -5,13 +5,14 @@ use crate::os_input_output::{AsyncReader, NullAsyncReader};
 use crate::route::NotificationEnd;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
-    panes::PaneId,
+    panes::{PaneId, TextPlumbPayload},
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction},
     screen::{ScreenInstruction, TabOverrideResult},
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
     ClientId, ServerInstruction,
 };
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tokio::task::JoinHandle;
@@ -91,6 +92,10 @@ pub enum PtyInstruction {
     ClosePane(PaneId, Option<NotificationEnd>),
     CloseTab(Vec<PaneId>),
     ReRunCommandInPane(PaneId, RunCommand, Option<NotificationEnd>),
+    PlumbText {
+        pane_id: PaneId,
+        text: TextPlumbPayload,
+    },
     DropToShellInPane {
         pane_id: PaneId,
         shell: Option<PathBuf>,
@@ -172,6 +177,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::NewTab(..) => PtyContext::NewTab,
             PtyInstruction::OverrideLayout(..) => PtyContext::OverrideLayout,
             PtyInstruction::ReRunCommandInPane(..) => PtyContext::ReRunCommandInPane,
+            PtyInstruction::PlumbText { .. } => PtyContext::PlumbText,
             PtyInstruction::DropToShellInPane { .. } => PtyContext::DropToShellInPane,
             PtyInstruction::SpawnInPlaceTerminal(..) => PtyContext::SpawnInPlaceTerminal,
             PtyInstruction::DumpLayout(..) => PtyContext::DumpLayout,
@@ -631,6 +637,9 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                         _ => Err::<(), _>(err).non_fatal(),
                     },
                 }
+            },
+            PtyInstruction::PlumbText { pane_id, text } => {
+                pty.plumb_text(pane_id, text);
             },
             PtyInstruction::DropToShellInPane {
                 pane_id,
@@ -2196,6 +2205,56 @@ impl Pty {
         self.post_command_discovery_hook = post_command_discovery_hook;
     }
 
+    fn plumb_text(&self, pane_id: PaneId, text: TextPlumbPayload) {
+        let mut command = text_plumber_command();
+        command
+            .arg("open")
+            .arg("--source")
+            .arg("zellij");
+        if let Some(click_byte_offset) = text.click_byte_offset {
+            command
+                .arg("--click-byte-offset")
+                .arg(click_byte_offset.to_string());
+        }
+        if let Some(cwd) = self.cwd_for_pane_id(&pane_id) {
+            if cwd.is_dir() {
+                command.current_dir(&cwd);
+            }
+            command.arg("--cwd").arg(cwd);
+        }
+        command
+            .arg("--")
+            .arg(text.text)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match command.spawn() {
+            Ok(process) => {
+                reap_text_plumber(process);
+            },
+            Err(e) => {
+                log::error!("Failed to spawn text-plumber: {}", e);
+            },
+        }
+    }
+
+    fn cwd_for_pane_id(&self, pane_id: &PaneId) -> Option<PathBuf> {
+        match pane_id {
+            PaneId::Terminal(id) => self
+                .id_to_child_pid
+                .get(id)
+                .and_then(|&pid| {
+                    self.bus
+                        .os_input
+                        .as_ref()
+                        .and_then(|input| input.get_cwd(pid))
+                })
+                .or_else(|| self.terminal_cwds.get(id).cloned()),
+            PaneId::Plugin(plugin_id) => self.plugin_cwds.get(plugin_id).cloned(),
+        }
+    }
+
     pub fn notify_cwd_from_osc7(&mut self, terminal_id: u32, path: PathBuf) {
         use std::sync::atomic::Ordering;
 
@@ -2369,6 +2428,27 @@ impl Drop for Pty {
                 .fatal();
         }
     }
+}
+
+fn text_plumber_command() -> Command {
+    if let Some(command) = std::env::var_os("ZELLIJ_TEXT_PLUMBER") {
+        return Command::new(command);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let go_bin_plumber = PathBuf::from(home).join("go/bin/text-plumber");
+        if go_bin_plumber.exists() {
+            return Command::new(go_bin_plumber);
+        }
+    }
+    Command::new("text-plumber")
+}
+
+fn reap_text_plumber(mut process: Child) {
+    std::thread::spawn(move || {
+        if let Err(e) = process.wait() {
+            log::error!("text-plumber failed: {}", e);
+        }
+    });
 }
 
 fn send_command_not_found_to_screen(

@@ -4101,13 +4101,47 @@ fn preserve_background_color_on_resize() {
     );
 }
 
+#[test]
+fn link_uri_at_returns_osc8_target() {
+    let grid = create_grid_with_content("\x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\\n");
+
+    assert_eq!(
+        grid.link_uri_at(&Position::new(0, 1)),
+        Some("https://example.test".to_owned())
+    );
+}
+
+#[test]
+fn text_for_plumbing_at_returns_wrapped_logical_line_and_byte_offset() {
+    let grid = create_grid_with_dimensions(5, 10, "0123456789abcdef\n");
+
+    let text = grid.text_for_plumbing_at(&Position::new(1, 2)).unwrap();
+
+    assert_eq!(text.text, "0123456789abcdef");
+    assert_eq!(text.click_byte_offset, Some(12));
+}
+
+#[test]
+fn text_for_plumbing_at_maps_wide_character_cells_to_the_character_start_byte() {
+    let grid = create_grid_with_content("a你b\n");
+
+    let text = grid.text_for_plumbing_at(&Position::new(0, 2)).unwrap();
+
+    assert_eq!(text.text, "a你b");
+    assert_eq!(text.click_byte_offset, Some(1));
+}
+
 fn create_grid_with_content(content: &str) -> Grid {
+    create_grid_with_dimensions(20, 80, content)
+}
+
+fn create_grid_with_dimensions(rows: usize, columns: usize, content: &str) -> Grid {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
     let mut grid = Grid::new(
-        20,
-        80,
+        rows,
+        columns,
         Rc::new(RefCell::new(Palette::default())),
         terminal_emulator_color_codes,
         Rc::new(RefCell::new(LinkHandler::new())),

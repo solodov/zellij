@@ -7,6 +7,7 @@ mod layout_applier;
 mod mouse_handler;
 mod swap_layouts;
 
+use crate::panes::TextPlumbPayload;
 use crate::plugins::PluginId;
 use copy_command::CopyCommand;
 pub use mouse_handler::{MouseEffect, MouseHandler, PaneEdge, PaneResizeState};
@@ -397,6 +398,12 @@ pub trait Pane {
         true
     }
     fn get_selected_text(&self, _client_id: ClientId) -> Option<String> {
+        None
+    }
+    fn link_uri_at(&self, _position: &Position) -> Option<String> {
+        None
+    }
+    fn text_for_plumbing_at(&self, _position: &Position) -> Option<TextPlumbPayload> {
         None
     }
     fn set_pane_default_colors(&mut self, _fg: Option<String>, _bg: Option<String>) {}

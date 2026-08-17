@@ -4,6 +4,7 @@ use super::kitty_graphics::{
     KittyPlacement, KittyReplyData, KittyRowsBelowTheViewport, KittyVerticalAnchor,
 };
 use super::sixel::{PixelRect, SixelGrid, SixelImageStore};
+use super::TextPlumbPayload;
 use base64::alphabet::STANDARD as BASE64_STANDARD_ALPHABET;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 use base64::engine::{DecodePaddingMode, Engine as _};
@@ -263,7 +264,7 @@ use crate::panes::hyperlink_tracker::HyperlinkTracker;
 use crate::panes::link_handler::LinkHandler;
 use crate::panes::search::SearchResult;
 use crate::panes::terminal_character::{
-    AnsiCode, CharsetIndex, Cursor, CursorShape, RcCharacterStyles, StandardCharset,
+    AnsiCode, CharsetIndex, Cursor, CursorShape, LinkAnchor, RcCharacterStyles, StandardCharset,
     TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
 };
 use crate::panes::Selection;
@@ -708,6 +709,40 @@ fn collect_and_build_logical_line(
 ///
 /// `boundaries` is the table produced by `collect_and_build_logical_line`.
 /// `viewport` is `&self.viewport`.
+/// Map a display cell in one viewport row to a byte offset in the logical line.
+///
+/// If the cell falls inside a wide character, return that character's start byte.
+fn display_col_to_byte_offset(
+    row_idx: usize,
+    display_col: usize,
+    logical_text: &str,
+    boundaries: &[(usize, usize)],
+    viewport: &VecDeque<Row>,
+) -> Option<usize> {
+    let boundary_idx = boundaries.iter().position(|(idx, _)| *idx == row_idx)?;
+    let row_byte_start = boundaries.get(boundary_idx)?.1;
+    let row_byte_end = boundaries
+        .get(boundary_idx + 1)
+        .map(|(_, byte_start)| *byte_start)
+        .unwrap_or(logical_text.len());
+    let row = viewport.get(row_idx)?;
+
+    let mut current_display_col = 0usize;
+    let mut current_byte_offset = row_byte_start;
+    for ch in &row.columns {
+        let width = ch.character.width().unwrap_or(1).max(1);
+        if display_col < current_display_col + width {
+            return Some(current_byte_offset);
+        }
+        current_display_col += width;
+        current_byte_offset += ch.character.len_utf8();
+    }
+
+    Some(row_byte_end)
+}
+
+/// Map a byte offset in the concatenated logical-line string back to
+/// (viewport_row_idx, display_column).
 fn byte_offset_to_display_col(
     byte_offset: usize,
     boundaries: &[(usize, usize)],
@@ -3324,6 +3359,65 @@ impl Grid {
             Some(selection.join("\n"))
         }
     }
+    /// Return the OSC8 target URI under a viewport position.
+    pub fn link_uri_at(&self, position: &Position) -> Option<String> {
+        let row_idx = usize::try_from(position.line.0).ok()?;
+        let row = self.viewport.get(row_idx)?;
+        let (char_index, _) = row.absolute_character_index_and_position_in_char(position.column.0);
+        let link_id = match row.columns.get(char_index)?.styles.link_anchor {
+            Some(LinkAnchor::Start(id)) => Some(id),
+            Some(LinkAnchor::End) => self.previous_link_start_id(row_idx, char_index),
+            None => None,
+        }?;
+        self.link_handler.borrow().uri_for_link_id(link_id)
+    }
+
+    fn previous_link_start_id(&self, row_idx: usize, char_index: usize) -> Option<u16> {
+        for y in (0..=row_idx).rev() {
+            let row = self.viewport.get(y)?;
+            let last_index = if y == row_idx {
+                char_index.checked_sub(1)
+            } else {
+                row.columns.len().checked_sub(1)
+            };
+            let Some(last_index) = last_index else {
+                continue;
+            };
+            for index in (0..=last_index).rev() {
+                match row.columns.get(index)?.styles.link_anchor {
+                    Some(LinkAnchor::Start(id)) => return Some(id),
+                    Some(LinkAnchor::End) => return None,
+                    None => {},
+                }
+            }
+        }
+        None
+    }
+
+    /// Return the full wrapped logical line and clicked byte offset at a viewport position.
+    pub fn text_for_plumbing_at(&self, position: &Position) -> Option<TextPlumbPayload> {
+        let row_idx = usize::try_from(position.line.0).ok()?;
+        let (_canonical, _group_len, logical_text, boundaries) =
+            collect_and_build_logical_line(&self.viewport, row_idx)?;
+        let click_byte_offset = display_col_to_byte_offset(
+            row_idx,
+            position.column.0,
+            &logical_text,
+            &boundaries,
+            &self.viewport,
+        )?;
+
+        let trimmed_len = logical_text.trim_end_matches(' ').len();
+        if trimmed_len == 0 {
+            return None;
+        }
+
+        Some(TextPlumbPayload {
+            text: logical_text[..trimmed_len].to_owned(),
+            click_byte_offset: Some(click_byte_offset.min(trimmed_len)),
+        })
+    }
+
     pub fn absolute_position_in_scrollback(&self) -> usize {
         self.lines_above.len() + self.cursor.y
     }

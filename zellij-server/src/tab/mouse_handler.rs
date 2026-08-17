@@ -6,8 +6,9 @@ use zellij_utils::pane_size::PaneGeom;
 use zellij_utils::position::Position;
 
 use crate::background_jobs::BackgroundJob;
-use crate::panes::PaneId;
+use crate::panes::{PaneId, TextPlumbPayload};
 use crate::plugins::PluginInstruction;
+use crate::pty::PtyInstruction;
 use crate::screen::{GuestModalOutcome, ScreenInstruction};
 use crate::ClientId;
 
@@ -162,6 +163,10 @@ enum MouseAction {
     ScrollRight {
         pane_id: PaneId,
         cols: usize,
+    },
+    PlumbText {
+        pane_id: PaneId,
+        position: Position,
     },
     ResizeScrollUp {
         pane_id: PaneId,
@@ -778,6 +783,25 @@ impl MouseHandler {
                 pane_id: _,
                 position,
             } => Self::execute_focus_pane(tab, position, client_id),
+            MouseAction::PlumbText { pane_id, position } => {
+                let Some(pane) = tab.get_pane_with_id(pane_id) else {
+                    return Ok(MouseEffect::default());
+                };
+                let relative_position = pane.relative_position(&position);
+                let text = pane
+                    .link_uri_at(&relative_position)
+                    .map(|uri| TextPlumbPayload {
+                        text: uri,
+                        click_byte_offset: None,
+                    })
+                    .or_else(|| pane.text_for_plumbing_at(&relative_position));
+                if let Some(text) = text {
+                    tab.senders
+                        .send_to_pty(PtyInstruction::PlumbText { pane_id, text })
+                        .with_context(err_context)?;
+                }
+                Ok(MouseEffect::default())
+            },
             MouseAction::FocusPaneAndClickThrough {
                 pane_id: _,
                 position,
@@ -1455,6 +1479,13 @@ impl MouseHandler {
                         position: event.position,
                     });
                 }
+                return Ok(MouseAction::NoAction);
+            }
+            if matches!(details.pane_id, PaneId::Terminal(_)) {
+                return Ok(MouseAction::PlumbText {
+                    pane_id: details.pane_id,
+                    position: event.position,
+                });
             }
             return Ok(MouseAction::NoAction);
         }
@@ -1939,6 +1970,30 @@ mod tests {
             mouse_scroll_resize,
             passthrough_pane_id: None,
         }
+    }
+
+    #[test]
+    fn ctrl_left_click_terminal_content_plumbs_text() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let mut event = MouseEvent::new_left_press_event(position);
+        event.ctrl = true;
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::PlumbText {
+                pane_id: PaneId::Terminal(1),
+                position,
+            }
+        );
     }
 
     #[test]

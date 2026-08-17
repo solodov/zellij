@@ -500,6 +500,7 @@ pub enum PtyContext {
     ClosePane,
     CloseTab,
     ReRunCommandInPane,
+    PlumbText,
     DropToShellInPane,
     SpawnInPlaceTerminal,
     DumpLayout,
