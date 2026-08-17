@@ -39,6 +39,8 @@ use zellij_utils::{
 
 const TABSTOP_WIDTH: usize = 8; // TODO: is this always right?
 pub const MAX_TITLE_STACK_SIZE: usize = 1000;
+// Acme-like selection uses a soft background while preserving foreground colors.
+const TEXT_SELECTION_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xed, 0xee, 0xa6));
 
 const BASE64_DECODER: GeneralPurpose = GeneralPurpose::new(
     &BASE64_STANDARD_ALPHABET,
@@ -2045,20 +2047,11 @@ impl Grid {
                 .selection
                 .contains_row(character_chunk.y.saturating_sub(content_y))
             {
-                let background_color = match style.colors.text_selected.background {
-                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
-                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
-                };
-                let foreground_color = match style.colors.text_selected.base {
-                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
-                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
-                };
-
                 character_chunk.add_selection_and_colors(
                     HighlightSelection {
                         selection: self.selection,
-                        bg: Some(background_color),
-                        fg: Some(foreground_color),
+                        bg: Some(TEXT_SELECTION_BACKGROUND),
+                        fg: None,
                         bold: false,
                         italic: false,
                         underline: false,
