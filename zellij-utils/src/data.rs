@@ -3319,6 +3319,8 @@ pub enum NewPanePlacement {
         pane_id_to_stack_under: Option<PaneId>,
         borderless: Option<bool>,
     },
+    AcmeColumn,
+    AcmePane,
 }
 
 impl Default for NewPanePlacement {
@@ -3361,7 +3363,9 @@ impl NewPanePlacement {
     pub fn should_float(&self) -> Option<bool> {
         match self {
             NewPanePlacement::Floating(_) => Some(true),
-            NewPanePlacement::Tiled { .. } => Some(false),
+            NewPanePlacement::Tiled { .. }
+            | NewPanePlacement::AcmeColumn
+            | NewPanePlacement::AcmePane => Some(false),
             _ => None,
         }
     }
@@ -3376,6 +3380,7 @@ impl NewPanePlacement {
     pub fn should_stack(&self) -> bool {
         match self {
             NewPanePlacement::Stacked { .. } => true,
+            NewPanePlacement::AcmeColumn | NewPanePlacement::AcmePane => false,
             _ => false,
         }
     }
@@ -3395,6 +3400,7 @@ impl NewPanePlacement {
             NewPanePlacement::Floating(coords) => coords.as_ref().and_then(|c| c.borderless),
             NewPanePlacement::InPlace { borderless, .. } => *borderless,
             NewPanePlacement::Stacked { borderless, .. } => *borderless,
+            NewPanePlacement::AcmeColumn | NewPanePlacement::AcmePane => None,
         }
     }
 }

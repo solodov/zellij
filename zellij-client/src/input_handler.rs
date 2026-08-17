@@ -441,6 +441,8 @@ impl InputHandler {
             | Action::SwitchToMode { .. }
             | Action::ClearScreen
             | Action::NewPane { .. }
+            | Action::NewAcmeColumn
+            | Action::NewAcmePane
             | Action::Run { .. }
             | Action::NewTiledPane { .. }
             | Action::NewFloatingPane { .. }

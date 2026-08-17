@@ -72,6 +72,10 @@ macro_rules! parse_kdl_action_arguments {
                 "ToggleFocusNoUiFullscreen" => Ok(Action::ToggleFocusNoUiFullscreen),
                 "TogglePaneFrames" => Ok(Action::TogglePaneFrames),
                 "ToggleActiveSyncTab" => Ok(Action::ToggleActiveSyncTab),
+                "NewAcmeColumn" => Ok(Action::NewAcmeColumn),
+                "NewAcmePane" => Ok(Action::NewAcmePane),
+                "AcmeMaximizePane" => Ok(Action::AcmeMaximizePane),
+                "EqualizeAcmeColumns" => Ok(Action::EqualizeAcmeColumns),
                 "TogglePaneEmbedOrFloating" => Ok(Action::TogglePaneEmbedOrFloating),
                 "ToggleFloatingPanes" => Ok(Action::ToggleFloatingPanes),
                 "ShowFloatingPanes" => Ok(Action::ShowFloatingPanes { tab_id: None }),
@@ -772,6 +776,10 @@ impl Action {
                 Some(node)
             },
             Action::ToggleActiveSyncTab => Some(KdlNode::new("ToggleActiveSyncTab")),
+            Action::NewAcmeColumn => Some(KdlNode::new("NewAcmeColumn")),
+            Action::NewAcmePane => Some(KdlNode::new("NewAcmePane")),
+            Action::AcmeMaximizePane => Some(KdlNode::new("AcmeMaximizePane")),
+            Action::EqualizeAcmeColumns => Some(KdlNode::new("EqualizeAcmeColumns")),
             Action::NewPane {
                 direction,
                 pane_name: _,
@@ -1616,6 +1624,18 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "ToggleActiveSyncTab" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "NewAcmeColumn" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "NewAcmePane" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "AcmeMaximizePane" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "EqualizeAcmeColumns" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "TogglePaneEmbedOrFloating" => {

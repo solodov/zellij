@@ -270,6 +270,14 @@ pub enum Action {
     SetPaneFrameStyle(PaneFrameStyle),
     /// Toggle between sending text commands to all panes on the current tab and normal mode.
     ToggleActiveSyncTab,
+    /// Create a new Acme-style top-level column after the focused column.
+    NewAcmeColumn,
+    /// Create a new Acme-style pane below the focused pane in the focused column.
+    NewAcmePane,
+    /// Maximize the focused pane within its Acme-style column.
+    AcmeMaximizePane,
+    /// Equalize the widths of Acme-style top-level columns.
+    EqualizeAcmeColumns,
     /// Open a new pane in the specified direction (relative to focus).
     /// If no direction is specified, will try to use the biggest available space.
     NewPane {

@@ -430,9 +430,17 @@ pub mod action {
         SelectCommandAtScrollPosition(super::SelectCommandAtScrollPositionAction),
         #[prost(message, tag="151")]
         CopyLastCommandOutput(super::CopyLastCommandOutputAction),
+        #[prost(message, tag="900")]
+        NewAcmeColumn(super::NewAcmeColumnAction),
+        #[prost(message, tag="901")]
+        NewAcmePane(super::NewAcmePaneAction),
+        #[prost(message, tag="902")]
+        AcmeMaximizePane(super::AcmeMaximizePaneAction),
+        #[prost(message, tag="903")]
+        EqualizeAcmeColumns(super::EqualizeAcmeColumnsAction),
     }
 }
-// Action message definitions (all 92 variants)
+// Action message definitions (all 96 variants)
 
 /// Simple action types (no data)
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -558,6 +566,22 @@ pub struct SetPaneFrameStyleAction {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ToggleActiveSyncTabAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NewAcmeColumnAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NewAcmePaneAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AcmeMaximizePaneAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EqualizeAcmeColumnsAction {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1466,7 +1490,7 @@ pub struct SwitchSessionAction {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NewPanePlacement {
-    #[prost(oneof="new_pane_placement::PlacementType", tags="1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof="new_pane_placement::PlacementType", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub placement_type: ::core::option::Option<new_pane_placement::PlacementType>,
 }
 /// Nested message and enum types in `NewPanePlacement`.
@@ -1491,6 +1515,10 @@ pub mod new_pane_placement {
         TiledWithOptions(super::TiledPlacement),
         #[prost(message, tag="8")]
         StackedWithOptions(super::StackedPlacement),
+        #[prost(bool, tag="9")]
+        AcmeColumn(bool),
+        #[prost(bool, tag="10")]
+        AcmePane(bool),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]

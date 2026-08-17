@@ -2045,6 +2045,10 @@ impl TryFrom<Action> for ProtobufAction {
                 optional_payload: None,
             }),
             Action::NoOp
+            | Action::NewAcmeColumn
+            | Action::NewAcmePane
+            | Action::AcmeMaximizePane
+            | Action::EqualizeAcmeColumns
             | Action::Confirm
             | Action::NewInPlacePluginPane {
                 plugin: _,
@@ -2669,6 +2673,9 @@ impl TryFrom<NewPanePlacement> for ProtobufNewPanePlacement {
                     pane_id,
                     borderless,
                 }))
+            },
+            NewPanePlacement::AcmeColumn | NewPanePlacement::AcmePane => {
+                return Err("Acme pane placements are not supported in the plugin API");
             },
         };
 

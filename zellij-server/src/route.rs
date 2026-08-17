@@ -668,6 +668,48 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::NewAcmeColumn => {
+            senders
+                .send_to_pty(PtyInstruction::SpawnTerminal(
+                    default_shell.clone(),
+                    None,
+                    NewPanePlacement::AcmeColumn,
+                    false,
+                    ClientTabIndexOrPaneId::ClientId(client_id),
+                    Some(NotificationEnd::new(completion_tx)),
+                    false, // set_blocking
+                ))
+                .with_context(err_context)?;
+        },
+        Action::NewAcmePane => {
+            senders
+                .send_to_pty(PtyInstruction::SpawnTerminal(
+                    default_shell.clone(),
+                    None,
+                    NewPanePlacement::AcmePane,
+                    false,
+                    ClientTabIndexOrPaneId::ClientId(client_id),
+                    Some(NotificationEnd::new(completion_tx)),
+                    false, // set_blocking
+                ))
+                .with_context(err_context)?;
+        },
+        Action::AcmeMaximizePane => {
+            senders
+                .send_to_screen(ScreenInstruction::AcmeMaximizePane(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::EqualizeAcmeColumns => {
+            senders
+                .send_to_screen(ScreenInstruction::EqualizeAcmeColumns(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::NewPane {
             direction,
             pane_name,

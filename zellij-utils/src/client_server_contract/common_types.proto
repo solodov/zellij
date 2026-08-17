@@ -289,10 +289,15 @@ message Action {
     ScrollToNextPromptAction scroll_to_next_prompt = 149;
     SelectCommandAtScrollPositionAction select_command_at_scroll_position = 150;
     CopyLastCommandOutputAction copy_last_command_output = 151;
+    // Zacme fork actions use a high tag range to avoid upstream action collisions.
+    NewAcmeColumnAction new_acme_column = 900;
+    NewAcmePaneAction new_acme_pane = 901;
+    AcmeMaximizePaneAction acme_maximize_pane = 902;
+    EqualizeAcmeColumnsAction equalize_acme_columns = 903;
   }
 }
 
-// Action message definitions (all 92 variants)
+// Action message definitions (all 96 variants)
 
 // Simple action types (no data)
 message QuitAction {}
@@ -329,6 +334,10 @@ message SetPaneFrameStyleAction {
   string style = 1;
 }
 message ToggleActiveSyncTabAction {}
+message NewAcmeColumnAction {}
+message NewAcmePaneAction {}
+message AcmeMaximizePaneAction {}
+message EqualizeAcmeColumnsAction {}
 message TogglePaneEmbedOrFloatingAction {}
 message ToggleFloatingPanesAction {}
 message ShowFloatingPanesAction {
@@ -869,6 +878,8 @@ message NewPanePlacement {
     NoPreferencePlacement no_preference_with_options = 6;
     TiledPlacement tiled_with_options = 7;
     StackedPlacement stacked_with_options = 8;
+    bool acme_column = 9;
+    bool acme_pane = 10;
   }
 }
 

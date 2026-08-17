@@ -1164,6 +1164,7 @@ impl From<crate::input::actions::Action>
     fn from(action: crate::input::actions::Action) -> Self {
         use crate::client_server_contract::client_server_contract::{
             action::ActionType,
+            AcmeMaximizePaneAction,
             AreFloatingPanesVisibleAction,
             BreakPaneAction,
             BreakPaneLeftAction,
@@ -1189,6 +1190,7 @@ impl From<crate::input::actions::Action>
             EditFileAction,
             EditScrollbackAction,
             EditScrollbackByPaneIdAction,
+            EqualizeAcmeColumnsAction,
             FocusGuestSessionAction,
             FocusHostSessionAction,
             FocusLastPaneAction,
@@ -1222,6 +1224,8 @@ impl From<crate::input::actions::Action>
             MovePaneByPaneIdAction,
             MoveTabAction,
             MoveTabByTabIdAction,
+            NewAcmeColumnAction,
+            NewAcmePaneAction,
             NewBlockingPaneAction,
             NewFloatingPaneAction,
             NewFloatingPluginPaneAction,
@@ -1496,6 +1500,18 @@ impl From<crate::input::actions::Action>
             },
             crate::input::actions::Action::ToggleActiveSyncTab => {
                 ActionType::ToggleActiveSyncTab(ToggleActiveSyncTabAction {})
+            },
+            crate::input::actions::Action::NewAcmeColumn => {
+                ActionType::NewAcmeColumn(NewAcmeColumnAction {})
+            },
+            crate::input::actions::Action::NewAcmePane => {
+                ActionType::NewAcmePane(NewAcmePaneAction {})
+            },
+            crate::input::actions::Action::AcmeMaximizePane => {
+                ActionType::AcmeMaximizePane(AcmeMaximizePaneAction {})
+            },
+            crate::input::actions::Action::EqualizeAcmeColumns => {
+                ActionType::EqualizeAcmeColumns(EqualizeAcmeColumnsAction {})
             },
             crate::input::actions::Action::NewPane {
                 direction,
@@ -2402,6 +2418,12 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             },
             ActionType::ToggleActiveSyncTab(_) => {
                 Ok(crate::input::actions::Action::ToggleActiveSyncTab)
+            },
+            ActionType::NewAcmeColumn(_) => Ok(crate::input::actions::Action::NewAcmeColumn),
+            ActionType::NewAcmePane(_) => Ok(crate::input::actions::Action::NewAcmePane),
+            ActionType::AcmeMaximizePane(_) => Ok(crate::input::actions::Action::AcmeMaximizePane),
+            ActionType::EqualizeAcmeColumns(_) => {
+                Ok(crate::input::actions::Action::EqualizeAcmeColumns)
             },
             ActionType::NewPane(new_pane_action) => Ok(crate::input::actions::Action::NewPane {
                 direction: new_pane_action
@@ -3912,6 +3934,8 @@ impl From<crate::data::NewPanePlacement>
                     .map(|id| id.into())
                     .unwrap_or_default(),
             ),
+            crate::data::NewPanePlacement::AcmeColumn => PlacementType::AcmeColumn(true),
+            crate::data::NewPanePlacement::AcmePane => PlacementType::AcmePane(true),
         };
         Self {
             placement_type: Some(placement_type),
@@ -3997,6 +4021,8 @@ impl TryFrom<crate::client_server_contract::client_server_contract::NewPanePlace
                     borderless: None,
                 })
             },
+            PlacementType::AcmeColumn(_) => Ok(crate::data::NewPanePlacement::AcmeColumn),
+            PlacementType::AcmePane(_) => Ok(crate::data::NewPanePlacement::AcmePane),
         }
     }
 }
