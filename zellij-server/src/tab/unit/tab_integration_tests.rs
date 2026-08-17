@@ -26,7 +26,7 @@ use zellij_utils::input::layout::{
 };
 use zellij_utils::input::mouse::MouseEvent;
 use zellij_utils::ipc::IpcReceiverWithContext;
-use zellij_utils::pane_size::{Size, SizeInPixels};
+use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
 use zellij_utils::position::Position;
 
 use crate::pty_writer::PtyWriteInstruction;
@@ -16364,4 +16364,1210 @@ fn host_focus_events_only_reach_panes_that_asked_for_them() {
         .get(&1)
         .map(|bytes| String::from_utf8_lossy(bytes).to_string());
     assert_eq!(written, Some("\u{1b}[O\u{1b}[I".to_owned()));
+}
+
+fn pane_geometries(tab: &Tab) -> BTreeMap<PaneId, PaneGeom> {
+    tab.get_tiled_pane_ids()
+        .into_iter()
+        .filter_map(|pane_id| {
+            tab.get_pane_with_id(pane_id)
+                .map(|pane| (pane_id, pane.position_and_size()))
+        })
+        .collect()
+}
+
+fn left_click(tab: &mut Tab, position: Position, client_id: ClientId) {
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_release_event(position), client_id)
+        .unwrap();
+}
+
+fn ctrl_left_click(tab: &mut Tab, position: Position, client_id: ClientId) {
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_with_ctrl_event(position),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_with_ctrl_event(position),
+        client_id,
+    )
+    .unwrap();
+}
+
+fn left_drag(tab: &mut Tab, start: Position, end: Position, client_id: ClientId) {
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(start), client_id)
+        .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_motion_event(end), client_id)
+        .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_release_event(end), client_id)
+        .unwrap();
+}
+
+fn pane_order_by_y(tab: &Tab) -> Vec<PaneId> {
+    let mut panes: Vec<(PaneId, PaneGeom)> = pane_geometries(tab).into_iter().collect();
+    panes.sort_by_key(|(_, geom)| geom.y);
+    panes.into_iter().map(|(pane_id, _)| pane_id).collect()
+}
+
+fn assert_acme_columns_fill_viewport(tab: &Tab, size: Size) {
+    let geoms = pane_geometries(tab);
+    let mut columns: BTreeMap<(usize, usize), Vec<PaneGeom>> = BTreeMap::new();
+    for geom in geoms.values() {
+        columns
+            .entry((geom.x, geom.cols.as_usize()))
+            .or_default()
+            .push(*geom);
+    }
+
+    let mut next_x = 0;
+    for ((x, cols), mut pane_geoms) in columns {
+        assert_eq!(x, next_x);
+        next_x += cols;
+
+        pane_geoms.sort_by_key(|geom| geom.y);
+        let mut next_y = 0;
+        for geom in pane_geoms {
+            assert_eq!(geom.y, next_y);
+            assert_eq!(geom.x, x);
+            assert_eq!(geom.cols.as_usize(), cols);
+            next_y += geom.rows.as_usize();
+        }
+        assert_eq!(next_y, size.rows);
+    }
+    assert_eq!(next_x, size.cols);
+}
+
+#[test]
+fn acme_column_and_pane_actions_preserve_top_level_columns() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    tab.new_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmeColumn,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+    tab.new_pane(
+        PaneId::Terminal(3),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmePane,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+    tab.new_pane(
+        PaneId::Terminal(4),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmeColumn,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(4)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].x, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 24);
+
+    assert_eq!(geoms[&PaneId::Terminal(2)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(2)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 12);
+
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 12);
+    assert_eq!(geoms[&PaneId::Terminal(3)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 12);
+
+    assert_eq!(geoms[&PaneId::Terminal(4)].x, 80);
+    assert_eq!(geoms[&PaneId::Terminal(4)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(4)].rows.as_usize(), 24);
+}
+
+#[test]
+fn ctrl_clicking_acme_vertical_border_equalizes_column_widths() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmeColumn,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.resize(
+        client_id,
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_ne!(geoms[&PaneId::Terminal(2)].cols.as_usize(), 40);
+    let border_position = Position::new(
+        5,
+        (geoms[&PaneId::Terminal(2)].x + geoms[&PaneId::Terminal(2)].cols.as_usize() - 1) as u16,
+    );
+    ctrl_left_click(&mut tab, border_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].x, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(2)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(2)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, 80);
+    assert_eq!(geoms[&PaneId::Terminal(3)].cols.as_usize(), 40);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn new_acme_pane_equalizes_expanded_rows_and_preserves_collapsed_rows() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    tab.new_pane(
+        PaneId::Terminal(5),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmePane,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    for pane_id in [
+        PaneId::Terminal(1),
+        PaneId::Terminal(2),
+        PaneId::Terminal(5),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
+        assert_eq!(geoms[&pane_id].x, 0);
+        assert_eq!(geoms[&pane_id].cols.as_usize(), 120);
+    }
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 11);
+    assert_eq!(geoms[&PaneId::Terminal(5)].y, 12);
+    assert_eq!(geoms[&PaneId::Terminal(5)].rows.as_usize(), 10);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 22);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(4)].y, 23);
+    assert_eq!(geoms[&PaneId::Terminal(4)].rows.as_usize(), 1);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn acme_maximize_collapses_only_the_focused_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for (pane_id, placement) in [
+        (PaneId::Terminal(2), NewPanePlacement::AcmeColumn),
+        (PaneId::Terminal(3), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(4), NewPanePlacement::AcmeColumn),
+    ] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, client_id)
+        .unwrap();
+    let before = pane_geometries(&tab);
+    tab.acme_maximize_pane(client_id);
+    let after = pane_geometries(&tab);
+
+    assert_eq!(after[&PaneId::Terminal(1)], before[&PaneId::Terminal(1)]);
+    assert_eq!(after[&PaneId::Terminal(4)], before[&PaneId::Terminal(4)]);
+    assert_eq!(after[&PaneId::Terminal(2)].y, 0);
+    assert_eq!(after[&PaneId::Terminal(2)].rows.as_usize(), 1);
+    assert_eq!(after[&PaneId::Terminal(3)].y, 1);
+    assert_eq!(after[&PaneId::Terminal(3)].rows.as_usize(), 23);
+}
+
+#[test]
+fn dragging_top_acme_title_is_no_op() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    let title_position = Position::new(0, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(5, 5)),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(Position::new(5, 5)),
+        client_id,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 22);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 23);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 1);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn dragging_lower_collapsed_acme_title_expands_that_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    let title_position = Position::new(23, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(18, 5)),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(Position::new(18, 5)),
+        client_id,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 17);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 18);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 6);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn closing_acme_pane_expands_remaining_panes_in_its_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for (pane_id, placement) in [
+        (PaneId::Terminal(2), NewPanePlacement::AcmeColumn),
+        (PaneId::Terminal(3), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(4), NewPanePlacement::AcmeColumn),
+    ] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.close_pane(PaneId::Terminal(2), false, None);
+
+    let geoms = pane_geometries(&tab);
+    assert!(!geoms.contains_key(&PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(3)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 24);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn closing_acme_pane_above_collapsed_pane_preserves_collapsed_rows() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+
+    tab.close_pane(PaneId::Terminal(2), false, None);
+
+    let geoms = pane_geometries(&tab);
+    assert!(!geoms.contains_key(&PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 22);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 22);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(4)].y, 23);
+    assert_eq!(geoms[&PaneId::Terminal(4)].rows.as_usize(), 1);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn closing_acme_pane_focuses_previous_pane_in_same_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for (pane_id, placement) in [
+        (PaneId::Terminal(2), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(3), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(4), NewPanePlacement::AcmeColumn),
+    ] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, client_id)
+        .unwrap();
+
+    tab.close_pane(PaneId::Terminal(3), false, None);
+
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn clicking_active_acme_title_button_maximizes_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(2)];
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+
+    left_click(&mut tab, button_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 22);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 23);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 1);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn dragging_inner_collapsed_acme_title_down_expands_pane_above_it() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(4), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    let title_position = Position::new(1, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(6, 5)),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(Position::new(6, 5)),
+        client_id,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 6);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 6);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 7);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(4)].y, 8);
+    assert_eq!(geoms[&PaneId::Terminal(4)].rows.as_usize(), 16);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn dragging_inner_collapsed_acme_title_back_to_start_restores_initial_rows() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(4), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    let before = pane_geometries(&tab);
+    let title_position = Position::new(1, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(6, 5)),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_motion_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_release_event(title_position), client_id)
+        .unwrap();
+
+    assert_eq!(pane_geometries(&tab), before);
+}
+
+#[test]
+fn dragging_inner_collapsed_acme_title_up_expands_that_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    let title_position = Position::new(22, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(title_position), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(17, 5)),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(Position::new(17, 5)),
+        client_id,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 16);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 16);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 17);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 6);
+    assert_eq!(geoms[&PaneId::Terminal(4)].y, 23);
+    assert_eq!(geoms[&PaneId::Terminal(4)].rows.as_usize(), 1);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn focused_collapsed_acme_title_does_not_show_terminal_cursor() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id)
+        .unwrap();
+
+    assert_eq!(tab.get_active_terminal_cursor_position(client_id), None);
+}
+
+#[test]
+fn hovering_collapsed_acme_title_does_not_set_hover_state() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+
+    let effect = tab
+        .handle_mouse_event(
+            &MouseEvent::new_buttonless_motion(Position::new(0, 4)),
+            client_id,
+        )
+        .unwrap();
+
+    assert!(!tab.query_mouse_hover_pane_id().contains_key(&client_id));
+    assert!(!effect.state_changed);
+}
+
+#[test]
+fn clicking_maximized_acme_title_button_restores_previous_pane_sizes() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.resize(
+        client_id,
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Down)),
+    )
+    .unwrap();
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(2)];
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+    left_click(&mut tab, button_position, client_id);
+
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(2)];
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+    left_click(&mut tab, button_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 8);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 8);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 9);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 17);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 7);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn ctrl_clicking_acme_title_bar_equalizes_column_pane_heights() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.resize(
+        client_id,
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Down)),
+    )
+    .unwrap();
+
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(2)];
+    let title_position = Position::new(target_geom.y as i32, (target_geom.x + 3) as u16);
+    ctrl_left_click(&mut tab, title_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 8);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 8);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 8);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 16);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 8);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn ctrl_clicking_acme_title_button_does_not_equalize_column_pane_heights() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    tab.resize(
+        client_id,
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Down)),
+    )
+    .unwrap();
+
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(2)];
+    let before = pane_geometries(&tab);
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+    ctrl_left_click(&mut tab, button_position, client_id);
+
+    assert_eq!(pane_geometries(&tab), before);
+}
+
+#[test]
+fn clicking_inactive_acme_title_button_focuses_and_maximizes_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(3)];
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+
+    left_click(&mut tab, button_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 1);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 1);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 2);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 22);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn dragging_acme_title_button_moves_pane_to_another_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    tab.new_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmeColumn,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    let source_geom = geoms[&PaneId::Terminal(2)];
+    let target_geom = geoms[&PaneId::Terminal(1)];
+    let source_button = Position::new(source_geom.y as i32, (source_geom.x + 1) as u16);
+    let target_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+
+    left_drag(&mut tab, source_button, target_position, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].x, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].cols.as_usize(), 120);
+    assert_eq!(geoms[&PaneId::Terminal(1)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].rows.as_usize(), 12);
+    assert_eq!(geoms[&PaneId::Terminal(2)].x, 0);
+    assert_eq!(geoms[&PaneId::Terminal(2)].cols.as_usize(), 120);
+    assert_eq!(geoms[&PaneId::Terminal(2)].y, 12);
+    assert_eq!(geoms[&PaneId::Terminal(2)].rows.as_usize(), 12);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn left_dragging_acme_title_button_onto_next_pane_swaps_downward() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    tab.new_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmePane,
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    let pane_1_button = Position::new(geoms[&PaneId::Terminal(1)].y as i32, 1);
+    let pane_2_button = Position::new(geoms[&PaneId::Terminal(2)].y as i32, 1);
+    left_drag(&mut tab, pane_1_button, pane_2_button, client_id);
+
+    assert_eq!(
+        pane_order_by_y(&tab),
+        vec![PaneId::Terminal(2), PaneId::Terminal(1)]
+    );
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)));
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn left_dragging_acme_title_button_reorders_panes_within_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    let geoms = pane_geometries(&tab);
+    let pane_3_button = Position::new(geoms[&PaneId::Terminal(3)].y as i32, 1);
+    let pane_1_button = Position::new(geoms[&PaneId::Terminal(1)].y as i32, 1);
+    left_drag(&mut tab, pane_3_button, pane_1_button, client_id);
+
+    assert_eq!(
+        pane_order_by_y(&tab),
+        vec![
+            PaneId::Terminal(3),
+            PaneId::Terminal(1),
+            PaneId::Terminal(2)
+        ]
+    );
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    assert_acme_columns_fill_viewport(&tab, size);
+
+    let geoms = pane_geometries(&tab);
+    let pane_1_button = Position::new(geoms[&PaneId::Terminal(1)].y as i32, 1);
+    let pane_2_button = Position::new(geoms[&PaneId::Terminal(2)].y as i32, 1);
+    left_drag(&mut tab, pane_1_button, pane_2_button, client_id);
+
+    assert_eq!(
+        pane_order_by_y(&tab),
+        vec![
+            PaneId::Terminal(3),
+            PaneId::Terminal(2),
+            PaneId::Terminal(1)
+        ]
+    );
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)));
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn middle_clicking_acme_title_button_closes_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmePane,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, client_id)
+        .unwrap();
+    let target_geom = pane_geometries(&tab)[&PaneId::Terminal(3)];
+    let button_position = Position::new(target_geom.y as i32, (target_geom.x + 1) as u16);
+
+    tab.handle_mouse_event(
+        &MouseEvent::new_middle_press_event(button_position),
+        client_id,
+    )
+    .unwrap();
+
+    let geoms = pane_geometries(&tab);
+    assert!(!geoms.contains_key(&PaneId::Terminal(3)));
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn middle_clicking_last_acme_title_button_closes_last_pane() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    tab.handle_mouse_event(
+        &MouseEvent::new_middle_press_event(Position::new(0, 1)),
+        client_id,
+    )
+    .unwrap();
+
+    assert!(tab.get_tiled_pane_ids().is_empty());
+    assert_eq!(tab.get_active_pane_id(client_id), None);
+}
+
+#[test]
+fn closing_collapsed_acme_pane_after_maximize_restores_column_height() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for (pane_id, placement) in [
+        (PaneId::Terminal(2), NewPanePlacement::AcmeColumn),
+        (PaneId::Terminal(3), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(4), NewPanePlacement::AcmeColumn),
+    ] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, client_id)
+        .unwrap();
+    tab.acme_maximize_pane(client_id);
+    tab.close_pane(PaneId::Terminal(2), false, None);
+
+    let geoms = pane_geometries(&tab);
+    assert!(!geoms.contains_key(&PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].y, 0);
+    assert_eq!(geoms[&PaneId::Terminal(3)].rows.as_usize(), 24);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn closing_last_acme_pane_in_column_expands_neighboring_column() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        tab.new_pane(
+            pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::AcmeColumn,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+
+    tab.close_pane(PaneId::Terminal(2), false, None);
+
+    let geoms = pane_geometries(&tab);
+    assert!(!geoms.contains_key(&PaneId::Terminal(2)));
+    assert_eq!(geoms[&PaneId::Terminal(1)].x, 0);
+    assert_eq!(geoms[&PaneId::Terminal(1)].cols.as_usize(), 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, 40);
+    assert_eq!(geoms[&PaneId::Terminal(3)].cols.as_usize(), 80);
+    assert_acme_columns_fill_viewport(&tab, size);
 }

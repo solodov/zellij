@@ -2187,6 +2187,38 @@ pub fn disabled_mouse_hover_effect() {
 }
 
 #[test]
+pub fn middle_clicking_last_acme_title_button_kills_session() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut mock_screen = MockScreen::new(size);
+    mock_screen.config.options.pane_frame_style = Some(PaneFrameStyle::Titles);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    while server_receiver.try_recv().is_ok() {}
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::MouseEvent(
+        MouseEvent::new_middle_press_event(Position::new(0, 1)),
+        client_id,
+        None,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let mut killed_session = false;
+    while let Ok((instruction, _)) = server_receiver.try_recv() {
+        if matches!(instruction, ServerInstruction::KillSession) {
+            killed_session = true;
+            break;
+        }
+    }
+    mock_screen.teardown(vec![screen_thread]);
+
+    assert!(killed_session);
+}
+
+#[test]
 fn group_panes_with_mouse() {
     let size = Size {
         cols: 121,
