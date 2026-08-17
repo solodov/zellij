@@ -13,6 +13,7 @@ pub mod boundary_type {
     pub const TOP_RIGHT: &str = "┐";
     pub const TOP_RIGHT_ROUND: &str = "╮";
     pub const VERTICAL: &str = "│";
+    pub const HEAVY_VERTICAL: &str = "┃";
     pub const HORIZONTAL: &str = "─";
     pub const TOP_LEFT: &str = "┌";
     pub const TOP_LEFT_ROUND: &str = "╭";
@@ -71,6 +72,19 @@ impl BoundarySymbol {
             )
         };
         Ok(tc)
+    }
+    fn without_horizontal_component(&self) -> Option<Self> {
+        use boundary_type::*;
+        match self.boundary_type {
+            HORIZONTAL => None,
+            TOP_RIGHT | TOP_LEFT | BOTTOM_RIGHT | BOTTOM_LEFT | VERTICAL_LEFT | VERTICAL_RIGHT
+            | HORIZONTAL_DOWN | HORIZONTAL_UP | CROSS => Some(BoundarySymbol {
+                boundary_type: VERTICAL,
+                invisible: self.invisible,
+                color: self.color,
+            }),
+            _ => Some(*self),
+        }
     }
 }
 
@@ -578,6 +592,37 @@ impl Boundaries {
             }
         }
     }
+    /// Remove horizontal boundary components inside rectangular row segments.
+    pub fn remove_horizontal_segments(&mut self, segments: &[(usize, usize, usize)]) {
+        for (x, y, width) in segments {
+            for col in *x..x.saturating_add(*width) {
+                let coordinates = Coordinates::new(col, *y);
+                if let Some(symbol) = self.boundary_characters.remove(&coordinates) {
+                    if let Some(stripped_symbol) = symbol.without_horizontal_component() {
+                        self.boundary_characters
+                            .insert(coordinates, stripped_symbol);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Override all boundary glyph colors.
+    pub fn set_color(&mut self, color: Option<(PaletteColor, usize)>) {
+        for symbol in self.boundary_characters.values_mut() {
+            symbol.color = color;
+        }
+    }
+
+    /// Render vertical-only boundary cells with a heavier glyph.
+    pub fn use_heavy_verticals(&mut self) {
+        for symbol in self.boundary_characters.values_mut() {
+            if symbol.boundary_type == boundary_type::VERTICAL {
+                symbol.boundary_type = boundary_type::HEAVY_VERTICAL;
+            }
+        }
+    }
+
     pub fn render(
         &self,
         existing_boundaries_on_screen: Option<&Boundaries>,
@@ -651,5 +696,124 @@ impl Boundaries {
             && rect.x() + rect.cols() <= self.viewport.x + self.viewport.cols
             && rect.y() >= self.viewport.y
             && rect.y() + rect.rows() <= self.viewport.y + self.viewport.rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_horizontal_segments_preserves_vertical_components() {
+        let mut boundaries = Boundaries::new(Viewport {
+            x: 0,
+            y: 0,
+            rows: 10,
+            cols: 10,
+        });
+        boundaries.boundary_characters.insert(
+            Coordinates::new(1, 2),
+            BoundarySymbol::new(boundary_type::VERTICAL_RIGHT),
+        );
+        boundaries.boundary_characters.insert(
+            Coordinates::new(2, 2),
+            BoundarySymbol::new(boundary_type::HORIZONTAL),
+        );
+        boundaries.boundary_characters.insert(
+            Coordinates::new(3, 2),
+            BoundarySymbol::new(boundary_type::CROSS),
+        );
+        boundaries.boundary_characters.insert(
+            Coordinates::new(4, 2),
+            BoundarySymbol::new(boundary_type::VERTICAL),
+        );
+
+        boundaries.remove_horizontal_segments(&[(1, 2, 4)]);
+
+        assert_eq!(
+            boundaries
+                .boundary_characters
+                .get(&Coordinates::new(1, 2))
+                .map(|symbol| symbol.boundary_type),
+            Some(boundary_type::VERTICAL)
+        );
+        assert!(!boundaries
+            .boundary_characters
+            .contains_key(&Coordinates::new(2, 2)));
+        assert_eq!(
+            boundaries
+                .boundary_characters
+                .get(&Coordinates::new(3, 2))
+                .map(|symbol| symbol.boundary_type),
+            Some(boundary_type::VERTICAL)
+        );
+        assert_eq!(
+            boundaries
+                .boundary_characters
+                .get(&Coordinates::new(4, 2))
+                .map(|symbol| symbol.boundary_type),
+            Some(boundary_type::VERTICAL)
+        );
+    }
+
+    #[test]
+    fn use_heavy_verticals_only_changes_vertical_glyphs() {
+        let mut boundaries = Boundaries::new(Viewport {
+            x: 0,
+            y: 0,
+            rows: 10,
+            cols: 10,
+        });
+        boundaries.boundary_characters.insert(
+            Coordinates::new(2, 1),
+            BoundarySymbol::new(boundary_type::VERTICAL),
+        );
+        boundaries.boundary_characters.insert(
+            Coordinates::new(3, 1),
+            BoundarySymbol::new(boundary_type::HORIZONTAL),
+        );
+
+        boundaries.use_heavy_verticals();
+
+        assert_eq!(
+            boundaries
+                .boundary_characters
+                .get(&Coordinates::new(2, 1))
+                .map(|symbol| symbol.boundary_type),
+            Some(boundary_type::HEAVY_VERTICAL)
+        );
+        assert_eq!(
+            boundaries
+                .boundary_characters
+                .get(&Coordinates::new(3, 1))
+                .map(|symbol| symbol.boundary_type),
+            Some(boundary_type::HORIZONTAL)
+        );
+    }
+
+    #[test]
+    fn set_color_overrides_all_boundary_glyph_colors() {
+        let mut boundaries = Boundaries::new(Viewport {
+            x: 0,
+            y: 0,
+            rows: 10,
+            cols: 10,
+        });
+        boundaries.boundary_characters.insert(
+            Coordinates::new(2, 1),
+            BoundarySymbol::new(boundary_type::VERTICAL),
+        );
+        boundaries.boundary_characters.insert(
+            Coordinates::new(3, 1),
+            BoundarySymbol::new(boundary_type::HORIZONTAL),
+        );
+
+        let color = Some((PaletteColor::Rgb((0, 0, 0)), 0));
+        boundaries.set_color(color);
+
+        assert!(boundaries
+            .boundary_characters
+            .values()
+            .all(|symbol| symbol.color == color));
     }
 }

@@ -1,6 +1,7 @@
 use crate::output::CharacterChunk;
 use crate::panes::{
-    AnsiCode, CharacterStyles, RcCharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
+    AnsiCode, CharacterStyles, NamedColor, RcCharacterStyles, TerminalCharacter,
+    EMPTY_TERMINAL_CHARACTER,
 };
 use crate::tab::GuestChoiceIndicator;
 use crate::ui::boundaries::boundary_type;
@@ -60,6 +61,116 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
     })
 }
 
+const ACME_TITLE_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xdd, 0xf7, 0xff));
+const ACME_TITLE_BUTTON_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x5f, 0x3d, 0xd6));
+const ACME_ACTIVE_TITLE_BUTTON: char = '■';
+const ACME_INACTIVE_TITLE_BUTTON: char = '□';
+
+pub(crate) fn render_acme_title_line_for_pane(
+    title: &str,
+    width: usize,
+    is_main_client: bool,
+    _mouse_is_hovering_over_pane: bool,
+    acme_title_status: Option<char>,
+    status_trailing_spaces: usize,
+) -> Vec<TerminalCharacter> {
+    let title_style = acme_title_style(is_main_client);
+    let button_style = acme_title_button_style(is_main_client);
+    let status_style = acme_title_status_style(is_main_client);
+    let status_width = acme_title_status
+        .map(|status| 1 + status.width().unwrap_or(0) + status_trailing_spaces)
+        .filter(|status_width| *status_width <= width)
+        .unwrap_or(0);
+    let title_width = width.saturating_sub(status_width);
+    let mut line = vec![];
+    let mut used_width = 0;
+    let append_character = |line: &mut Vec<TerminalCharacter>,
+                            used_width: &mut usize,
+                            character: char,
+                            style: &RcCharacterStyles,
+                            max_width: usize| {
+        let character_width = character.width().unwrap_or(0);
+        if *used_width + character_width > max_width {
+            return false;
+        }
+        line.push(TerminalCharacter::new_styled(character, style.clone()));
+        *used_width += character_width;
+        true
+    };
+
+    let title_button = if is_main_client {
+        ACME_ACTIVE_TITLE_BUTTON
+    } else {
+        ACME_INACTIVE_TITLE_BUTTON
+    };
+    append_character(&mut line, &mut used_width, ' ', &title_style, title_width);
+    append_character(
+        &mut line,
+        &mut used_width,
+        title_button,
+        &button_style,
+        title_width,
+    );
+    append_character(&mut line, &mut used_width, ' ', &title_style, title_width);
+    for character in title.chars() {
+        if !append_character(
+            &mut line,
+            &mut used_width,
+            character,
+            &title_style,
+            title_width,
+        ) {
+            break;
+        }
+    }
+    append_character(&mut line, &mut used_width, ' ', &title_style, title_width);
+
+    while used_width < title_width {
+        line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
+        used_width += 1;
+    }
+    if let Some(status) = acme_title_status.filter(|_| status_width > 0) {
+        line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
+        line.push(TerminalCharacter::new_styled(status, status_style));
+        for _ in 0..status_trailing_spaces {
+            line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
+        }
+    }
+    line
+}
+
+fn acme_title_style(is_main_client: bool) -> RcCharacterStyles {
+    let mut styles = RcCharacterStyles::reset();
+    styles.update(|styles| {
+        styles.background = Some(ACME_TITLE_BACKGROUND);
+        styles.foreground = Some(AnsiCode::NamedColor(NamedColor::Black));
+        styles.underline = Some(AnsiCode::Underline(None));
+        if is_main_client {
+            styles.bold = Some(AnsiCode::On);
+        } else {
+            styles.bold = Some(AnsiCode::Reset);
+        }
+    });
+    styles
+}
+
+fn acme_title_button_style(is_main_client: bool) -> RcCharacterStyles {
+    let mut styles = acme_title_style(is_main_client);
+    styles.update(|styles| {
+        styles.foreground = if is_main_client {
+            Some(ACME_TITLE_BUTTON_FOREGROUND)
+        } else {
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        };
+        styles.bold = Some(AnsiCode::Reset);
+    });
+    styles
+}
+
+fn acme_title_status_style(is_main_client: bool) -> RcCharacterStyles {
+    acme_title_button_style(is_main_client)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ExitStatus {
     Code(i32),
@@ -86,6 +197,11 @@ pub struct FrameParams {
     pub pane_is_stacked_over: bool,
     pub pane_is_stacked: bool,
     pub should_draw_pane_frames: bool,
+    pub frameless_title_fills_width: bool,
+    pub frameless_title_on_previous_line: bool,
+    pub acme_title: bool,
+    pub acme_title_status: Option<char>,
+    pub force_render: bool,
     pub pane_is_floating: bool,
     pub content_offset: Offset,
     pub mouse_is_hovering_over_pane: bool,
@@ -119,6 +235,10 @@ pub struct PaneFrame {
     pane_is_stacked_under: bool,
     pane_is_stacked: bool,
     should_draw_pane_frames: bool,
+    frameless_title_fills_width: bool,
+    frameless_title_on_previous_line: bool,
+    acme_title: bool,
+    acme_title_status: Option<char>,
     is_pinned: bool,
     is_floating: bool,
     content_offset: Offset,
@@ -158,6 +278,10 @@ impl PaneFrame {
             pane_is_stacked_under: frame_params.pane_is_stacked_under,
             pane_is_stacked: frame_params.pane_is_stacked,
             should_draw_pane_frames: frame_params.should_draw_pane_frames,
+            frameless_title_fills_width: frame_params.frameless_title_fills_width,
+            frameless_title_on_previous_line: frame_params.frameless_title_on_previous_line,
+            acme_title: frame_params.acme_title,
+            acme_title_status: frame_params.acme_title_status,
             is_pinned: false,
             is_floating: frame_params.pane_is_floating,
             content_offset: frame_params.content_offset,
@@ -854,6 +978,14 @@ impl PaneFrame {
                 .with_context(|| format!("failed to render title '{}'", self.title));
         }
 
+        if self.acme_title {
+            return Ok(self.render_acme_title_line());
+        }
+
+        if self.frameless_title_fills_width {
+            return Ok(self.title_line_without_middle());
+        }
+
         let width = self.geom.cols;
         let title = self.bracketed_pane_title(width);
         let title_length = title.as_ref().map(|(_, length)| *length).unwrap_or(0);
@@ -863,6 +995,20 @@ impl PaneFrame {
         let right_budget = width.saturating_sub(focus_length + title_length);
         let right = self.bracketed_scroll_indicator(right_budget);
         Ok(self.compose_bracketed_title(focus, title, right))
+    }
+    fn render_acme_title_line(&self) -> Vec<TerminalCharacter> {
+        // Frameless titles with a right content offset lose their last cell to
+        // the vertical boundary renderer, so reserve one extra status pad cell.
+        let status_trailing_spaces = 1
+            + usize::from(self.content_offset.right != 0 && !self.should_draw_pane_frames);
+        render_acme_title_line_for_pane(
+            &self.title,
+            self.geom.cols,
+            self.is_main_client,
+            self.mouse_is_hovering_over_pane,
+            self.acme_title_status,
+            status_trailing_spaces,
+        )
     }
     fn bracketed_title_part(&self, content: &str) -> (Vec<TerminalCharacter>, usize) {
         let text = format!(" [ {} ] ", content);
@@ -1297,14 +1443,17 @@ impl PaneFrame {
                 // in order to give room to the boundaries between the panes to be drawn
                 one_line_title.pop();
             }
-            let y_coords_of_title = if self.pane_is_stacked_under && !self.should_draw_pane_frames {
-                // we only want to use the bottom offset in this case because panes that are
-                // stacked above the flexible pane should actually appear exactly where they are on
-                // screen, the content offset being "absorbed" by the flexible pane below them
-                self.geom.y.saturating_sub(self.content_offset.bottom)
-            } else {
-                self.geom.y
-            };
+            let y_coords_of_title =
+                if self.frameless_title_on_previous_line && !self.should_draw_pane_frames {
+                    self.geom.y.saturating_sub(1)
+                } else if self.pane_is_stacked_under && !self.should_draw_pane_frames {
+                    // we only want to use the bottom offset in this case because panes that are
+                    // stacked above the flexible pane should actually appear exactly where they are on
+                    // screen, the content offset being "absorbed" by the flexible pane below them
+                    self.geom.y.saturating_sub(self.content_offset.bottom)
+                } else {
+                    self.geom.y
+                };
 
             character_chunks.push(CharacterChunk::new(
                 one_line_title,
@@ -1474,6 +1623,11 @@ mod tests {
                 pane_is_stacked_under: false,
                 pane_is_stacked: false,
                 should_draw_pane_frames: true,
+                frameless_title_fills_width: false,
+                frameless_title_on_previous_line: false,
+                acme_title: false,
+                acme_title_status: None,
+                force_render: false,
                 pane_is_floating: is_floating,
                 content_offset: Offset::default(),
                 mouse_is_hovering_over_pane: false,
@@ -1494,6 +1648,176 @@ mod tests {
 
     fn characters_to_string(chars: &[TerminalCharacter]) -> String {
         chars.iter().map(|c| c.character).collect()
+    }
+
+    #[test]
+    fn frameless_title_style_left_aligns_title_and_fills_with_rule() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.should_draw_pane_frames = false;
+        frame.frameless_title_fills_width = true;
+
+        let text = characters_to_string(&frame.render_one_line_title().unwrap());
+        let rule = boundary_type::HORIZONTAL;
+        assert_eq!(
+            text,
+            format!("{rule} termflow {rule}{rule}{rule}{rule}{rule}")
+        );
+    }
+
+    #[test]
+    fn frameless_title_without_fill_keeps_centered_title() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.should_draw_pane_frames = false;
+
+        let text = characters_to_string(&frame.render_one_line_title().unwrap());
+        assert_eq!(text, "    termflow    ");
+    }
+
+    #[test]
+    fn acme_title_background_matches_reference_shade() {
+        assert_eq!(ACME_TITLE_BACKGROUND, AnsiCode::RgbCode((0xdd, 0xf7, 0xff)));
+    }
+
+    #[test]
+    fn acme_active_title_uses_underlined_bold_black_text_and_purple_button() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+
+        let title_line = frame.render_one_line_title().unwrap();
+        let text = characters_to_string(&title_line);
+        assert_eq!(text, " ■ termflow     ");
+        assert_eq!(title_line[1].character, ACME_ACTIVE_TITLE_BUTTON);
+        assert_eq!(
+            title_line[1].styles.foreground,
+            Some(ACME_TITLE_BUTTON_FOREGROUND)
+        );
+        assert_eq!(
+            title_line[3].styles.foreground,
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        );
+        assert_eq!(title_line[3].styles.bold, Some(AnsiCode::On));
+        assert_eq!(
+            title_line[15].styles.background,
+            Some(ACME_TITLE_BACKGROUND)
+        );
+        assert_eq!(
+            title_line[15].styles.underline,
+            Some(AnsiCode::Underline(None))
+        );
+    }
+
+    #[test]
+    fn acme_inactive_title_uses_underlined_hollow_black_button_and_normal_black_text() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.is_main_client = false;
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+
+        let title_line = frame.render_one_line_title().unwrap();
+        let text = characters_to_string(&title_line);
+        assert_eq!(text, " □ termflow     ");
+        assert_eq!(title_line[1].character, ACME_INACTIVE_TITLE_BUTTON);
+        assert_eq!(
+            title_line[1].styles.foreground,
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        );
+        assert_eq!(title_line[1].styles.bold, Some(AnsiCode::Reset));
+        assert_eq!(
+            title_line[3].styles.foreground,
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        );
+        assert_eq!(title_line[3].styles.bold, Some(AnsiCode::Reset));
+        assert_eq!(
+            title_line[15].styles.background,
+            Some(ACME_TITLE_BACKGROUND)
+        );
+        assert_eq!(
+            title_line[15].styles.underline,
+            Some(AnsiCode::Underline(None))
+        );
+    }
+
+    #[test]
+    fn acme_title_status_renders_right_aligned_with_button_foreground() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.is_main_client = false;
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+        frame.acme_title_status = Some('⠋');
+
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(characters_to_string(&title_line), " □ termflow   ⠋ ");
+        assert_eq!(title_line[14].character, '⠋');
+        assert_eq!(
+            title_line[14].styles.foreground,
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        );
+        assert_eq!(
+            title_line[15].styles.background,
+            Some(ACME_TITLE_BACKGROUND)
+        );
+
+        frame.content_offset = Offset {
+            right: 1,
+            ..Default::default()
+        };
+        let (chunks, _) = frame.render().unwrap();
+        assert_eq!(characters_to_string(&chunks[0].terminal_characters), " □ termflow  ⠋ ");
+
+        frame.is_main_client = true;
+        let active_title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            active_title_line[14].styles.foreground,
+            Some(ACME_TITLE_BUTTON_FOREGROUND)
+        );
+    }
+
+    #[test]
+    fn acme_title_hover_does_not_change_focus_styling() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.mouse_is_hovering_over_pane = true;
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+
+        let active_title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            active_title_line[15].styles.background,
+            Some(ACME_TITLE_BACKGROUND)
+        );
+        assert_eq!(active_title_line[1].character, ACME_ACTIVE_TITLE_BUTTON);
+
+        frame.is_main_client = false;
+        let inactive_title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            inactive_title_line[15].styles.background,
+            Some(ACME_TITLE_BACKGROUND)
+        );
+        assert_eq!(inactive_title_line[1].character, ACME_INACTIVE_TITLE_BUTTON);
+        assert_eq!(
+            inactive_title_line[1].styles.foreground,
+            Some(AnsiCode::NamedColor(NamedColor::Black))
+        );
+        assert_eq!(inactive_title_line[3].styles.bold, Some(AnsiCode::Reset));
+    }
+
+    #[test]
+    fn frameless_title_can_render_on_previous_row() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.geom.y = 5;
+        frame.should_draw_pane_frames = false;
+        frame.frameless_title_fills_width = true;
+        frame.frameless_title_on_previous_line = true;
+
+        let (chunks, _) = frame.render().unwrap();
+        assert_eq!(chunks[0].y, 4);
     }
 
     #[test]

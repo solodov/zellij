@@ -38,6 +38,7 @@ fn clear_hover_for_client(tab: &mut Tab, client_id: ClientId) -> bool {
 pub struct MouseEffect {
     pub state_changed: bool,
     pub leave_clipboard_message: bool,
+    pub kill_session_if_no_selectable_panes: bool,
     pub group_toggle: Option<PaneId>,
     pub group_add: Option<PaneId>,
     pub ungroup: bool,
@@ -48,6 +49,17 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: false,
+            kill_session_if_no_selectable_panes: false,
+            group_toggle: None,
+            group_add: None,
+            ungroup: false,
+        }
+    }
+    pub fn state_changed_and_kill_session_if_no_selectable_panes() -> Self {
+        MouseEffect {
+            state_changed: true,
+            leave_clipboard_message: false,
+            kill_session_if_no_selectable_panes: true,
             group_toggle: None,
             group_add: None,
             ungroup: false,
@@ -57,6 +69,7 @@ impl MouseEffect {
         MouseEffect {
             state_changed: false,
             leave_clipboard_message: true,
+            kill_session_if_no_selectable_panes: false,
             group_toggle: None,
             group_add: None,
             ungroup: false,
@@ -66,6 +79,7 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: true,
+            kill_session_if_no_selectable_panes: false,
             group_toggle: None,
             group_add: None,
             ungroup: false,
@@ -75,6 +89,7 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: false,
+            kill_session_if_no_selectable_panes: false,
             group_toggle: Some(pane_id),
             group_add: None,
             ungroup: false,
@@ -84,6 +99,7 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: false,
+            kill_session_if_no_selectable_panes: false,
             group_toggle: None,
             group_add: Some(pane_id),
             ungroup: false,
@@ -93,6 +109,7 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: false,
+            kill_session_if_no_selectable_panes: false,
             group_toggle: None,
             group_add: None,
             ungroup: true,
@@ -118,6 +135,36 @@ enum MouseAction {
         position: Position,
     },
     FocusPane {
+        pane_id: PaneId,
+        position: Position,
+    },
+    StartAcmeHandleDrag {
+        pane_id: PaneId,
+        position: Position,
+    },
+    ContinueAcmeHandleDrag {
+        position: Position,
+    },
+    StopAcmeHandleDrag {
+        position: Position,
+    },
+    NewAcmePane {
+        pane_id: PaneId,
+    },
+    NewAcmeColumn {
+        pane_id: PaneId,
+    },
+    EqualizeAcmePaneRows {
+        pane_id: PaneId,
+    },
+    EqualizeAcmeColumns,
+    AcmeClosePane {
+        pane_id: PaneId,
+    },
+    PasteFromHostClipboard {
+        pane_id: PaneId,
+    },
+    PlumbText {
         pane_id: PaneId,
         position: Position,
     },
@@ -164,13 +211,6 @@ enum MouseAction {
         pane_id: PaneId,
         cols: usize,
     },
-    PlumbText {
-        pane_id: PaneId,
-        position: Position,
-    },
-    PasteFromHostClipboard {
-        pane_id: PaneId,
-    },
     ResizeScrollUp {
         pane_id: PaneId,
     },
@@ -213,14 +253,24 @@ pub enum PaneEdge {
     BottomRight,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneResizeState {
     pub pane_id: PaneId,
     pub edge: PaneEdge,
     pub start_position: Position,
     pub start_geom: PaneGeom,
     pub is_floating: bool,
+    pub acme_resize_snapshot: Option<Vec<(PaneId, PaneGeom)>>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AcmeHandleDragState {
+    pane_id: PaneId,
+    start_position: Position,
+    is_dragging: bool,
+}
+
+const ACME_HANDLE_DRAG_THRESHOLD: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClickedPaneDetails {
@@ -228,6 +278,7 @@ struct ClickedPaneDetails {
     on_frame: bool,
     frame_intercepted: bool,
     edge: Option<PaneEdge>,
+    is_acme_title: bool,
     is_floating: bool,
     terminal_wants_mouse: bool,
 }
@@ -240,14 +291,43 @@ struct MouseEventContext {
     pane_being_resized: bool,
     selecting_with_mouse: bool,
     pane_being_moved: bool,
+    acme_handle_drag: Option<AcmeHandleDragState>,
     clicked_pane: Option<ClickedPaneDetails>,
     advanced_mouse_actions: bool,
+    acme_vertical_border_hit: bool,
+    acme_title_pane_id: Option<PaneId>,
+    acme_title_button_pane_id: Option<PaneId>,
     pinned_selectable: Option<PaneId>,
     pinned_unselectable: Option<PaneId>,
     focus_follows_mouse: bool,
     mouse_click_through: bool,
     mouse_scroll_resize: bool,
     passthrough_pane_id: Option<PaneId>,
+}
+
+fn position_is_on_vertical_frame(pane: &dyn Pane, position: &Position) -> bool {
+    if !pane.contains(position) {
+        return false;
+    }
+    let left_frame = pane.x()..pane.get_content_x();
+    let right_frame =
+        pane.get_content_x() + pane.get_content_columns()..pane.x() + pane.cols();
+    left_frame.contains(&position.column()) || right_frame.contains(&position.column())
+}
+
+fn acme_handle_drag_delta(start: Position, current: Position) -> (usize, usize) {
+    let line_delta = if start.line() >= current.line() {
+        (start.line() - current.line()) as usize
+    } else {
+        (current.line() - start.line()) as usize
+    };
+    let column_delta = start.column().abs_diff(current.column());
+    (line_delta, column_delta)
+}
+
+fn acme_handle_drag_exceeded_threshold(start: Position, current: Position) -> bool {
+    let (line_delta, column_delta) = acme_handle_drag_delta(start, current);
+    line_delta > ACME_HANDLE_DRAG_THRESHOLD || column_delta > ACME_HANDLE_DRAG_THRESHOLD
 }
 
 fn edge_and_delta_to_strategies(
@@ -457,6 +537,27 @@ impl MouseHandler {
                 client_id,
             )
         });
+        let acme_vertical_border_hit = clicked_pane
+            .as_ref()
+            .filter(|details| details.on_frame)
+            .map(|details| {
+                tab.tiled_panes.pane_is_in_acme_column(details.pane_id)
+                    && tab
+                        .get_pane_with_id(details.pane_id)
+                        .map(|pane| position_is_on_vertical_frame(pane, &event.position))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        let (acme_title_pane_id, acme_title_button_pane_id) = if floating_visible {
+            (None, None)
+        } else {
+            (
+                tab.tiled_panes
+                    .acme_title_pane_id_at_position(&event.position),
+                tab.tiled_panes
+                    .acme_title_button_pane_id_at_position(&event.position),
+            )
+        };
 
         let (pinned_selectable, pinned_unselectable) = if !floating_visible {
             let selectable = tab
@@ -481,8 +582,12 @@ impl MouseHandler {
             pane_being_resized: tab.pane_being_resized_with_mouse.is_some(),
             selecting_with_mouse: tab.selecting_with_mouse_in_pane.is_some(),
             pane_being_moved: tab.floating_panes.pane_is_being_moved_with_mouse(),
+            acme_handle_drag: tab.acme_handle_drag,
             clicked_pane,
             advanced_mouse_actions: tab.advanced_mouse_actions,
+            acme_vertical_border_hit,
+            acme_title_pane_id,
+            acme_title_button_pane_id,
             pinned_selectable,
             pinned_unselectable,
             focus_follows_mouse: tab.focus_follows_mouse,
@@ -502,30 +607,103 @@ impl MouseHandler {
     ) -> Option<ClickedPaneDetails> {
         let is_floating = tab.floating_panes.panes_contain(&pane_id);
         let is_hidden_stack_list_member = tab.pane_is_hidden_stack_list_member(&pane_id);
-        let pane = Self::get_pane_at(tab, position, false).ok()??;
+        let (on_frame, frame_intercepted, default_edge, terminal_wants_mouse) = {
+            let pane = Self::get_pane_at(tab, position, false).ok()??;
+            let on_frame = !is_hidden_stack_list_member && pane.position_is_on_frame(position);
+            let frame_intercepted =
+                on_frame && pane.intercept_mouse_event_on_frame(event, client_id);
+            let default_edge = if on_frame {
+                pane.get_edge_at_position(position)
+            } else {
+                None
+            };
+            let terminal_wants_mouse = if Some(pane_id) == active_pane_id {
+                let relative_position = pane.relative_position(position);
+                pane.mouse_left_click(&relative_position, false).is_some()
+            } else {
+                false
+            };
+            (
+                on_frame,
+                frame_intercepted,
+                default_edge,
+                terminal_wants_mouse,
+            )
+        };
 
-        let on_frame = !is_hidden_stack_list_member && pane.position_is_on_frame(position);
-        let frame_intercepted = on_frame && pane.intercept_mouse_event_on_frame(event, client_id);
-        let edge = if on_frame {
-            pane.get_edge_at_position(position)
+        let acme_title_hit = !is_floating
+            && tab.tiled_panes.acme_title_pane_id_at_position(position) == Some(pane_id);
+        let acme_title_edge = if acme_title_hit {
+            tab.tiled_panes
+                .acme_title_edge_at_position(pane_id, position)
         } else {
             None
         };
-        let terminal_wants_mouse = if Some(pane_id) == active_pane_id {
-            let relative_position = pane.relative_position(position);
-            pane.mouse_left_click(&relative_position, false).is_some()
+        let edge = if acme_title_hit {
+            acme_title_edge
         } else {
-            false
+            default_edge
         };
 
         Some(ClickedPaneDetails {
             pane_id,
-            on_frame,
-            frame_intercepted,
+            on_frame: on_frame || acme_title_hit,
+            frame_intercepted: frame_intercepted && !acme_title_hit,
             edge,
+            is_acme_title: acme_title_hit,
             is_floating,
-            terminal_wants_mouse,
+            terminal_wants_mouse: terminal_wants_mouse && !acme_title_hit,
         })
+    }
+
+    fn start_acme_handle_drag(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        position: Position,
+        client_id: ClientId,
+    ) -> Result<()> {
+        tab.focus_pane_with_id(pane_id, false, false, client_id)?;
+        tab.acme_handle_drag = Some(AcmeHandleDragState {
+            pane_id,
+            start_position: position,
+            is_dragging: false,
+        });
+        Ok(())
+    }
+
+    fn continue_acme_handle_drag(tab: &mut Tab, position: Position) {
+        if let Some(drag_state) = tab.acme_handle_drag.as_mut() {
+            drag_state.is_dragging = drag_state.is_dragging
+                || acme_handle_drag_exceeded_threshold(drag_state.start_position, position);
+        }
+    }
+
+    fn stop_acme_handle_drag(
+        tab: &mut Tab,
+        position: Position,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        let Some(drag_state) = tab.acme_handle_drag.take() else {
+            return Ok(MouseEffect::default());
+        };
+        let is_drag = drag_state.is_dragging
+            || acme_handle_drag_exceeded_threshold(drag_state.start_position, position);
+        if is_drag {
+            if tab.move_or_reorder_acme_pane_with_position(
+                drag_state.pane_id,
+                drag_state.start_position,
+                position,
+                client_id,
+            ) {
+                Ok(MouseEffect::state_changed())
+            } else {
+                Ok(MouseEffect::default())
+            }
+        } else {
+            tab.focus_pane_with_id(drag_state.pane_id, false, false, client_id)?;
+            tab.acme_toggle_title_button_pane(client_id);
+            Ok(MouseEffect::state_changed())
+        }
     }
 
     fn start_pane_resize_with_mouse(
@@ -551,12 +729,20 @@ impl MouseHandler {
                 .with_context(err_context)?
         };
 
+        let acme_resize_snapshot =
+            if !is_floating && matches!(edge, PaneEdge::Top | PaneEdge::Bottom) {
+                tab.tiled_panes.acme_resize_snapshot(pane_id)
+            } else {
+                None
+            };
+
         tab.pane_being_resized_with_mouse = Some(PaneResizeState {
             pane_id,
             edge,
             start_position: position,
             start_geom,
             is_floating,
+            acme_resize_snapshot,
         });
 
         Ok(())
@@ -569,13 +755,13 @@ impl MouseHandler {
     ) -> Result<bool> {
         let err_context = || "failed to continue pane resize with mouse";
 
-        let (pane_id, edge, is_floating, delta_x, delta_y) =
+        let (pane_id, edge, is_floating, acme_resize_snapshot, delta_x, delta_y) =
             if let Some(resize_state) = &tab.pane_being_resized_with_mouse {
                 let delta_x = current_position.column() as isize
                     - resize_state.start_position.column() as isize;
                 let delta_y = current_position.line() - resize_state.start_position.line();
 
-                if delta_x == 0 && delta_y == 0 {
+                if delta_x == 0 && delta_y == 0 && resize_state.acme_resize_snapshot.is_none() {
                     return Ok(false);
                 }
 
@@ -583,6 +769,7 @@ impl MouseHandler {
                     resize_state.pane_id,
                     resize_state.edge,
                     resize_state.is_floating,
+                    resize_state.acme_resize_snapshot.clone(),
                     delta_x,
                     delta_y,
                 )
@@ -592,7 +779,7 @@ impl MouseHandler {
 
         let strategies = edge_and_delta_to_strategies(edge, delta_x, delta_y);
 
-        if is_floating {
+        let changed = if is_floating {
             Self::resize_floating_pane_with_strategies(
                 tab,
                 pane_id,
@@ -600,6 +787,16 @@ impl MouseHandler {
                 (delta_x.unsigned_abs(), delta_y.unsigned_abs()),
             )
             .with_context(err_context)?;
+            true
+        } else if let Some(acme_resize_snapshot) = acme_resize_snapshot {
+            tab.tiled_panes
+                .resize_acme_pane_with_snapshot(
+                    pane_id,
+                    &acme_resize_snapshot,
+                    &strategies,
+                    delta_y.unsigned_abs(),
+                )
+                .with_context(err_context)?
         } else {
             Self::resize_tiled_pane_with_strategies(
                 tab,
@@ -608,15 +805,20 @@ impl MouseHandler {
                 (delta_x.abs() as f64, delta_y.abs() as f64),
             )
             .with_context(err_context)?;
-        }
+            true
+        };
 
         if let Some(resize_state) = tab.pane_being_resized_with_mouse.as_mut() {
-            resize_state.start_position = current_position;
+            if resize_state.acme_resize_snapshot.is_none() {
+                resize_state.start_position = current_position;
+            }
         }
 
-        tab.set_force_render();
+        if changed {
+            tab.set_force_render();
+        }
 
-        Ok(true)
+        Ok(changed)
     }
 
     fn stop_pane_resize_with_mouse(
@@ -786,6 +988,57 @@ impl MouseHandler {
                 pane_id: _,
                 position,
             } => Self::execute_focus_pane(tab, position, client_id),
+            MouseAction::StartAcmeHandleDrag { pane_id, position } => {
+                clear_hover_for_client(tab, client_id);
+                Self::start_acme_handle_drag(tab, pane_id, position, client_id)
+                    .with_context(err_context)?;
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::ContinueAcmeHandleDrag { position } => {
+                Self::continue_acme_handle_drag(tab, position);
+                Ok(MouseEffect::default())
+            },
+            MouseAction::StopAcmeHandleDrag { position } => {
+                Self::stop_acme_handle_drag(tab, position, client_id).with_context(err_context)
+            },
+            MouseAction::NewAcmePane { pane_id } => {
+                clear_hover_for_client(tab, client_id);
+                tab.focus_pane_with_id(pane_id, false, false, client_id)?;
+                tab.spawn_acme_pane_for_client(client_id)?;
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::NewAcmeColumn { pane_id } => {
+                clear_hover_for_client(tab, client_id);
+                tab.focus_pane_with_id(pane_id, false, false, client_id)?;
+                tab.spawn_acme_column_for_client(client_id)?;
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::EqualizeAcmePaneRows { pane_id } => {
+                let hover_cleared = clear_hover_for_client(tab, client_id);
+                if tab.equalize_acme_pane_rows(pane_id, client_id) || hover_cleared {
+                    Ok(MouseEffect::state_changed())
+                } else {
+                    Ok(MouseEffect::default())
+                }
+            },
+            MouseAction::EqualizeAcmeColumns => {
+                clear_hover_for_client(tab, client_id);
+                tab.equalize_acme_columns(client_id);
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::AcmeClosePane { pane_id } => {
+                clear_hover_for_client(tab, client_id);
+                tab.close_pane_by_pane_id(pane_id, None)
+                    .with_context(err_context)?;
+                Ok(MouseEffect::state_changed_and_kill_session_if_no_selectable_panes())
+            },
+            MouseAction::PasteFromHostClipboard { pane_id } => {
+                tab.focus_pane_with_id(pane_id, false, false, client_id)?;
+                tab.senders
+                    .send_to_screen(ScreenInstruction::PasteFromHostClipboard(pane_id))
+                    .with_context(err_context)?;
+                Ok(MouseEffect::state_changed())
+            },
             MouseAction::PlumbText { pane_id, position } => {
                 let Some(pane) = tab.get_pane_with_id(pane_id) else {
                     return Ok(MouseEffect::default());
@@ -804,13 +1057,6 @@ impl MouseHandler {
                         .with_context(err_context)?;
                 }
                 Ok(MouseEffect::default())
-            },
-            MouseAction::PasteFromHostClipboard { pane_id } => {
-                tab.focus_pane_with_id(pane_id, false, false, client_id)?;
-                tab.senders
-                    .send_to_screen(ScreenInstruction::PasteFromHostClipboard(pane_id))
-                    .with_context(err_context)?;
-                Ok(MouseEffect::state_changed())
             },
             MouseAction::FocusPaneAndClickThrough {
                 pane_id: _,
@@ -1204,7 +1450,6 @@ impl MouseHandler {
     ) -> Result<MouseEffect> {
         let mut should_render = false;
         let previous_hover_pane_id = tab.mouse_hover_pane_id.get(&client_id).copied();
-
         if tab.mouse_hover_effects {
             let previous_plugin_hover_pane_id = tab.plugin_hover_pane_id.get(&client_id).copied();
             let current_plugin_hover_pane_id = match pane_id {
@@ -1387,6 +1632,18 @@ impl MouseHandler {
             });
         }
 
+        if ctx.acme_handle_drag.is_some() {
+            return Ok(match event.event_type {
+                MouseEventType::Motion => MouseAction::ContinueAcmeHandleDrag {
+                    position: event.position,
+                },
+                MouseEventType::Release => MouseAction::StopAcmeHandleDrag {
+                    position: event.position,
+                },
+                _ => MouseAction::NoAction,
+            });
+        }
+
         if event.alt {
             if let (Some(passthrough_pane_id), Some(details)) =
                 (ctx.passthrough_pane_id, ctx.clicked_pane.as_ref())
@@ -1469,13 +1726,31 @@ impl MouseHandler {
             return Ok(MouseAction::NoAction);
         }
 
+        let is_ctrl_right_press =
+            event.ctrl && event.right && event.event_type == MouseEventType::Press;
+        if is_ctrl_right_press {
+            if let Some(pane_id) = ctx.acme_title_button_pane_id {
+                return Ok(MouseAction::NewAcmeColumn { pane_id });
+            }
+            return Ok(MouseAction::NoAction);
+        }
+
         let is_ctrl_left_press =
             event.ctrl && event.left && event.event_type == MouseEventType::Press;
         if is_ctrl_left_press {
+            if let Some(pane_id) = ctx.acme_title_button_pane_id {
+                return Ok(MouseAction::NewAcmePane { pane_id });
+            }
+            if let Some(pane_id) = ctx.acme_title_pane_id {
+                return Ok(MouseAction::EqualizeAcmePaneRows { pane_id });
+            }
             let Some(details) = &ctx.clicked_pane else {
                 return Ok(MouseAction::NoAction);
             };
             if details.on_frame {
+                if ctx.acme_vertical_border_hit {
+                    return Ok(MouseAction::EqualizeAcmeColumns);
+                }
                 if details.frame_intercepted {
                     return Ok(MouseAction::FrameIntercepted {
                         pane_id: details.pane_id,
@@ -1513,6 +1788,13 @@ impl MouseHandler {
                 .map(|id| id == details.pane_id)
                 .unwrap_or(false);
 
+            if ctx.acme_title_button_pane_id == Some(details.pane_id) {
+                return Ok(MouseAction::StartAcmeHandleDrag {
+                    pane_id: details.pane_id,
+                    position: event.position,
+                });
+            }
+
             if details.on_frame {
                 if details.frame_intercepted {
                     return Ok(MouseAction::FrameIntercepted {
@@ -1534,6 +1816,9 @@ impl MouseHandler {
                         is_floating: false,
                         position: event.position,
                     });
+                }
+                if details.is_acme_title {
+                    return Ok(MouseAction::NoAction);
                 }
             }
 
@@ -1575,6 +1860,9 @@ impl MouseHandler {
         }
 
         if event.right {
+            if matches!(&ctx.clicked_pane, Some(details) if details.is_acme_title) {
+                return Ok(MouseAction::NoAction);
+            }
             let Some(pane_id) = ctx.pane_id_at_position else {
                 return Ok(MouseAction::NoAction);
             };
@@ -1589,6 +1877,11 @@ impl MouseHandler {
         }
 
         if event.middle {
+            if event.event_type == MouseEventType::Press {
+                if let Some(pane_id) = ctx.acme_title_button_pane_id {
+                    return Ok(MouseAction::AcmeClosePane { pane_id });
+                }
+            }
             let Some(details) = &ctx.clicked_pane else {
                 return Ok(MouseAction::NoAction);
             };
@@ -1632,6 +1925,12 @@ impl MouseHandler {
             && !event.right
             && !event.middle;
         if is_buttonless_motion {
+            if ctx.acme_title_pane_id.is_some() {
+                return Ok(MouseAction::UpdateHover {
+                    pane_id: None,
+                    position: None,
+                });
+            }
             let Some(pane_id) = ctx.pane_id_at_position else {
                 return Ok(MouseAction::UpdateHover {
                     pane_id: None,
@@ -1979,8 +2278,12 @@ mod tests {
             pane_being_resized: false,
             selecting_with_mouse: false,
             pane_being_moved: false,
+            acme_handle_drag: None,
             clicked_pane: None,
             advanced_mouse_actions: true,
+            acme_vertical_border_hit: false,
+            acme_title_pane_id: None,
+            acme_title_button_pane_id: None,
             pinned_selectable: None,
             pinned_unselectable: None,
             focus_follows_mouse: false,
@@ -2001,6 +2304,7 @@ mod tests {
             on_frame: false,
             frame_intercepted: false,
             edge: None,
+            is_acme_title: false,
             is_floating: false,
             terminal_wants_mouse: false,
         });
@@ -2023,6 +2327,7 @@ mod tests {
             on_frame: false,
             frame_intercepted: false,
             edge: None,
+            is_acme_title: false,
             is_floating: false,
             terminal_wants_mouse: false,
         });
@@ -2049,6 +2354,7 @@ mod tests {
             on_frame: false,
             frame_intercepted: false,
             edge: None,
+            is_acme_title: false,
             is_floating: false,
             terminal_wants_mouse: false,
         });
@@ -2075,6 +2381,7 @@ mod tests {
             on_frame: false,
             frame_intercepted: false,
             edge: None,
+            is_acme_title: false,
             is_floating: false,
             terminal_wants_mouse: true,
         });
@@ -2084,6 +2391,40 @@ mod tests {
             MouseAction::SendToTerminal {
                 pane_id: PaneId::Terminal(1),
                 event,
+            }
+        );
+    }
+
+    #[test]
+    fn ctrl_left_click_acme_title_button_creates_pane() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_left_press_with_ctrl_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::NewAcmePane {
+                pane_id: PaneId::Terminal(1),
+            }
+        );
+    }
+
+    #[test]
+    fn ctrl_right_click_acme_title_button_creates_column() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let mut event = MouseEvent::new_right_press_event(position);
+        event.ctrl = true;
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::NewAcmeColumn {
+                pane_id: PaneId::Terminal(1),
             }
         );
     }

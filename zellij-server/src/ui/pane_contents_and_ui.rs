@@ -6,9 +6,27 @@ use crate::ui::boundaries::Boundaries;
 use crate::ui::pane_boundaries_frame::{FrameParams, StackListEntry};
 use crate::ClientId;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use zellij_utils::data::{client_id_to_colors, InputMode, PaletteColor, Style};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::pane_size::PaneGeom;
+
+const ACME_LONG_RUNNING_COMMAND_THRESHOLD_MS: u128 = 3_000;
+const ACME_LONG_RUNNING_COMMAND_SPINNER_INTERVAL_MS: u128 = 100;
+const ACME_LONG_RUNNING_COMMAND_SPINNER_FRAMES: [char; 10] =
+    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn acme_long_running_command_spinner(running_since: Option<Instant>) -> Option<char> {
+    let elapsed_ms = running_since?.elapsed().as_millis();
+    if elapsed_ms < ACME_LONG_RUNNING_COMMAND_THRESHOLD_MS {
+        return None;
+    }
+    let frame_index = ((elapsed_ms - ACME_LONG_RUNNING_COMMAND_THRESHOLD_MS)
+        / ACME_LONG_RUNNING_COMMAND_SPINNER_INTERVAL_MS)
+        as usize
+        % ACME_LONG_RUNNING_COMMAND_SPINNER_FRAMES.len();
+    Some(ACME_LONG_RUNNING_COMMAND_SPINNER_FRAMES[frame_index])
+}
 
 pub fn dim_character_chunks(character_chunks: &mut Vec<CharacterChunk>) {
     for chunk in character_chunks.iter_mut() {
@@ -18,6 +36,21 @@ pub fn dim_character_chunks(character_chunks: &mut Vec<CharacterChunk>) {
             });
         }
     }
+}
+
+/// Options that control pane frame and title rendering for one pane pass.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneFrameRenderOptions {
+    pub pane_is_stacked_under: bool,
+    pub pane_is_stacked_over: bool,
+    pub should_draw_pane_frames: bool,
+    pub frameless_title_fills_width: bool,
+    pub frameless_title_on_previous_line: bool,
+    pub acme_title: bool,
+    pub show_help_text: bool,
+    pub omit_title: bool,
+    pub mouse_scroll_resize: bool,
+    pub mouse_hover_tips: bool,
 }
 
 pub struct PaneContentsAndUi<'a> {
@@ -30,6 +63,10 @@ pub struct PaneContentsAndUi<'a> {
     pane_is_stacked_under: bool,
     pane_is_stacked_over: bool,
     should_draw_pane_frames: bool,
+    frameless_title_fills_width: bool,
+    frameless_title_on_previous_line: bool,
+    acme_title: bool,
+    force_render_frame: bool,
     mouse_is_hovering_over_pane_for_clients: HashSet<ClientId>,
     current_pane_group: HashMap<ClientId, Vec<PaneId>>,
     show_help_text: bool,
@@ -52,15 +89,9 @@ impl<'a> PaneContentsAndUi<'a> {
         active_panes: &HashMap<ClientId, PaneId>,
         multiple_users_exist_in_session: bool,
         z_index: Option<usize>,
-        pane_is_stacked_under: bool,
-        pane_is_stacked_over: bool,
-        should_draw_pane_frames: bool,
+        frame_options: PaneFrameRenderOptions,
         mouse_hover_pane_id: &HashMap<ClientId, PaneId>,
         current_pane_group: HashMap<ClientId, Vec<PaneId>>,
-        show_help_text: bool,
-        omit_title: bool,
-        mouse_scroll_resize: bool,
-        mouse_hover_tips: bool,
         dimmed_for_clients: HashSet<ClientId>,
     ) -> Self {
         let mut focused_clients: Vec<ClientId> = active_panes
@@ -86,20 +117,24 @@ impl<'a> PaneContentsAndUi<'a> {
             focused_clients,
             multiple_users_exist_in_session,
             z_index,
-            pane_is_stacked_under,
-            pane_is_stacked_over,
-            should_draw_pane_frames,
+            pane_is_stacked_under: frame_options.pane_is_stacked_under,
+            pane_is_stacked_over: frame_options.pane_is_stacked_over,
+            should_draw_pane_frames: frame_options.should_draw_pane_frames,
+            frameless_title_fills_width: frame_options.frameless_title_fills_width,
+            frameless_title_on_previous_line: frame_options.frameless_title_on_previous_line,
+            acme_title: frame_options.acme_title,
+            force_render_frame: false,
             mouse_is_hovering_over_pane_for_clients,
             current_pane_group,
-            show_help_text,
-            omit_title,
+            show_help_text: frame_options.show_help_text,
+            omit_title: frame_options.omit_title,
             frame_geom_override: None,
             stack_list_entry_width: None,
             stack_list_entry_is_selected: false,
             stack_list_entry_stack_is_focused: false,
             blank_title: false,
-            mouse_scroll_resize,
-            mouse_hover_tips,
+            mouse_scroll_resize: frame_options.mouse_scroll_resize,
+            mouse_hover_tips: frame_options.mouse_hover_tips,
             dimmed_for_clients,
         }
     }
@@ -111,6 +146,9 @@ impl<'a> PaneContentsAndUi<'a> {
     }
     pub fn set_blank_title(&mut self, blank_title: bool) {
         self.blank_title = blank_title;
+    }
+    pub fn force_render_frame(&mut self) {
+        self.force_render_frame = true;
     }
     pub fn set_stack_list_entry(
         &mut self,
@@ -358,6 +396,11 @@ impl<'a> PaneContentsAndUi<'a> {
         });
         let frame_is_dimmed = self.frame_is_dimmed_for_client(client_id);
         let guest_choice_indicator = self.pane.guest_choice_indicator(client_id);
+        let acme_title_status = if self.acme_title {
+            acme_long_running_command_spinner(self.pane.command_running_since())
+        } else {
+            None
+        };
         let frame_params = if session_is_mirrored {
             FrameParams {
                 focused_client,
@@ -370,6 +413,11 @@ impl<'a> PaneContentsAndUi<'a> {
                 pane_is_stacked_under: self.pane_is_stacked_under,
                 pane_is_stacked,
                 should_draw_pane_frames: self.should_draw_pane_frames,
+                frameless_title_fills_width: self.frameless_title_fills_width,
+                frameless_title_on_previous_line: self.frameless_title_on_previous_line,
+                acme_title: self.acme_title,
+                acme_title_status,
+                force_render: self.force_render_frame,
                 pane_is_floating,
                 content_offset: self.pane.get_content_offset(),
                 mouse_is_hovering_over_pane: self
@@ -399,6 +447,11 @@ impl<'a> PaneContentsAndUi<'a> {
                 pane_is_stacked_under: self.pane_is_stacked_under,
                 pane_is_stacked,
                 should_draw_pane_frames: self.should_draw_pane_frames,
+                frameless_title_fills_width: self.frameless_title_fills_width,
+                frameless_title_on_previous_line: self.frameless_title_on_previous_line,
+                acme_title: self.acme_title,
+                acme_title_status,
+                force_render: self.force_render_frame,
                 pane_is_floating,
                 content_offset: self.pane.get_content_offset(),
                 mouse_is_hovering_over_pane: self

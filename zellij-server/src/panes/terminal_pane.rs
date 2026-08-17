@@ -559,6 +559,7 @@ impl Pane for TerminalPane {
         } else {
             self.current_title()
         };
+        let force_render = frame_params.force_render;
         let pane_title = if frame_params.blank_title {
             String::new()
         } else if let Some(text_color_override) = self
@@ -596,7 +597,7 @@ impl Pane for TerminalPane {
         let res = match self.frame.get(&client_id) {
             // TODO: use and_then or something?
             Some(last_frame) => {
-                if &frame != last_frame {
+                if &frame != last_frame || force_render {
                     if !self.borderless {
                         let frame_output = frame.render().with_context(err_context)?;
                         self.frame.insert(client_id, frame);

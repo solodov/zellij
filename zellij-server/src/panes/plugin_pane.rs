@@ -443,6 +443,7 @@ impl Pane for PluginPane {
             .unwrap_or_else(|| self.current_geom());
         let grid = get_or_create_grid!(self, client_id);
         let err_context = || format!("failed to render frame for client {client_id}");
+        let force_render = frame_params.force_render;
         let pane_title = if frame_params.blank_title {
             String::new()
         } else if let Some(text_color_override) = self
@@ -479,7 +480,7 @@ impl Pane for PluginPane {
         let res = match self.frame.get(&client_id) {
             // TODO: use and_then or something?
             Some(last_frame) => {
-                if &frame != last_frame || is_pinned {
+                if &frame != last_frame || is_pinned || force_render {
                     if !self.borderless {
                         let frame_output = frame.render().with_context(err_context)?;
                         self.frame.insert(client_id, frame);

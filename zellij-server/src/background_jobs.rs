@@ -65,6 +65,7 @@ pub enum BackgroundJob {
     ),
     HighlightPanesWithMessage(Vec<PaneId>, String),
     RenderToClients,
+    AnimateLongRunningCommandTitles,
     QueryZellijWebServerStatus,
     ClearHelpText {
         client_id: ClientId,
@@ -94,7 +95,8 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             BackgroundJob::RunCommand(..) => BackgroundJobContext::RunCommand,
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
-            BackgroundJob::RenderToClients => BackgroundJobContext::ReportPluginList,
+            BackgroundJob::RenderToClients => BackgroundJobContext::RenderToClients,
+            BackgroundJob::AnimateLongRunningCommandTitles => BackgroundJobContext::RenderToClients,
             BackgroundJob::HighlightPanesWithMessage(..) => {
                 BackgroundJobContext::HighlightPanesWithMessage
             },
@@ -125,6 +127,7 @@ static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 static REPAINT_DELAY_MS: u64 = 10;
 static HELP_TEXT_DEBOUNCE_DURATION: u64 = 5000;
 static COMMAND_OUTPUT_FLASH_DURATION_MS: u64 = 400;
+static LONG_RUNNING_COMMAND_TITLE_ANIMATION_INTERVAL_MS: u64 = 100;
 
 #[derive(Clone)]
 pub struct SessionScanState {
@@ -168,6 +171,7 @@ pub(crate) fn background_jobs_main(
         Arc::new(Mutex::new(HashMap::new()));
     let pending_command_output_flash_clear: Arc<Mutex<HashMap<PaneId, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let pending_long_running_command_title_render = Arc::new(AtomicBool::new(false));
     let mut flashing_pane_bells: HashMap<PaneId, Arc<AtomicBool>> = HashMap::new();
     let mut flashing_tab_bells: HashMap<usize, Arc<AtomicBool>> = HashMap::new();
     let mut nested_guest_pings: HashMap<PaneId, Arc<AtomicBool>> = HashMap::new();
@@ -447,6 +451,25 @@ pub(crate) fn background_jobs_main(
                                 None,
                                 Event::WebServerStatus(status),
                             )]));
+                        }
+                    });
+                }
+            },
+            BackgroundJob::AnimateLongRunningCommandTitles => {
+                let should_spawn = pending_long_running_command_title_render
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok();
+                if should_spawn {
+                    runtime.spawn({
+                        let senders = bus.senders.clone();
+                        let pending = pending_long_running_command_title_render.clone();
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                LONG_RUNNING_COMMAND_TITLE_ANIMATION_INTERVAL_MS,
+                            ))
+                            .await;
+                            pending.store(false, Ordering::SeqCst);
+                            let _ = senders.send_to_screen(ScreenInstruction::RenderToClients);
                         }
                     });
                 }

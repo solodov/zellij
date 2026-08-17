@@ -15,7 +15,7 @@ use crate::{
     panes::{ActivePanes, PaneId},
     plugins::PluginInstruction,
     thread_bus::ThreadSenders,
-    ui::pane_contents_and_ui::PaneContentsAndUi,
+    ui::pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
     ClientId,
 };
 use std::cell::RefCell;
@@ -588,15 +588,16 @@ impl FloatingPanes {
                 &active_panes,
                 multiple_users_exist_in_session,
                 Some(z_index + 1), // +1 because 0 is reserved for non-floating panes
-                false,
-                false,
-                should_draw_pane_frames,
+                PaneFrameRenderOptions {
+                    should_draw_pane_frames,
+                    frameless_title_fills_width: pane_frame_style.draws_titles(),
+                    show_help_text,
+                    mouse_scroll_resize,
+                    mouse_hover_tips,
+                    ..Default::default()
+                },
                 mouse_hover_pane_id,
                 current_pane_group.clone(),
-                show_help_text,
-                false,
-                mouse_scroll_resize,
-                mouse_hover_tips,
                 self.dimmed_clients.clone(),
             );
             for client_id in &connected_clients {

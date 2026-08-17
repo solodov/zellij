@@ -10,7 +10,7 @@ use zellij_utils::{
 pub(super) const ACME_COLLAPSED_PANE_ROWS: usize = 1;
 pub(super) const ACME_TITLE_BUTTON_COLUMN_OFFSET: usize = 1;
 pub(super) const ACME_BOUNDARY_COLOR: Option<(PaletteColor, usize)> =
-    Some((PaletteColor::Rgb((0, 0, 0)), 0));
+    Some((PaletteColor::Rgb((0x5a, 0xae, 0xc6)), 0));
 
 #[derive(Clone, Debug)]
 pub(super) struct AcmePaneGeometry {

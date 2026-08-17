@@ -703,15 +703,6 @@ fn collect_and_build_logical_line(
     Some((canonical, group_len, text, boundaries))
 }
 
-/// Map a byte offset in the concatenated logical-line string back to
-/// (viewport_row_idx, display_column).
-///
-/// display_column is the sum of character.width() for all characters
-/// before the target character in that row — NOT a char count or byte count.
-/// This correctly handles wide characters (CJK, emoji).
-///
-/// `boundaries` is the table produced by `collect_and_build_logical_line`.
-/// `viewport` is `&self.viewport`.
 /// Map a display cell in one viewport row to a byte offset in the logical line.
 ///
 /// If the cell falls inside a wide character, return that character's start byte.

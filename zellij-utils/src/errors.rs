@@ -287,6 +287,8 @@ pub enum ScreenContext {
     ToggleActiveSyncTab,
     ToggleActiveTerminalFullscreen,
     ToggleActiveTerminalNoUiFullscreen,
+    AcmeMaximizePane,
+    EqualizeAcmeColumns,
     TogglePaneFrames,
     SetPaneFrameStyle,
     SetSelectable,

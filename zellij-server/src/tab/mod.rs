@@ -10,6 +10,7 @@ mod swap_layouts;
 use crate::panes::TextPlumbPayload;
 use crate::plugins::PluginId;
 use copy_command::CopyCommand;
+use mouse_handler::AcmeHandleDragState;
 pub use mouse_handler::{MouseEffect, MouseHandler, PaneEdge, PaneResizeState};
 use std::env::temp_dir;
 use std::net::IpAddr;
@@ -38,7 +39,7 @@ use crate::ui::hint_text::{
 };
 use crate::ui::{
     loading_indication::LoadingIndication, pane_boundaries_frame::FrameParams,
-    pane_contents_and_ui::PaneContentsAndUi,
+    pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
 };
 use layout_applier::LayoutApplier;
 use swap_layouts::SwapLayouts;
@@ -222,6 +223,7 @@ pub(crate) struct Tab {
     pending_vte_events: HashMap<u32, Vec<VteBytes>>,
     pub selecting_with_mouse_in_pane: Option<PaneId>, // this is only pub for the tests
     pane_being_resized_with_mouse: Option<PaneResizeState>,
+    acme_handle_drag: Option<AcmeHandleDragState>,
     link_handler: Rc<RefCell<LinkHandler>>,
     clipboard_provider: ClipboardProvider,
     // TODO: used only to focus the pane when the layout is loaded
@@ -998,6 +1000,7 @@ impl Tab {
             connected_clients,
             selecting_with_mouse_in_pane: None,
             pane_being_resized_with_mouse: None,
+            acme_handle_drag: None,
             link_handler: Rc::new(RefCell::new(LinkHandler::new())),
             clipboard_provider,
             focus_pane_id: None,
@@ -1681,15 +1684,14 @@ impl Tab {
                     &active_panes,
                     multiple_users_exist_in_session,
                     None,
-                    false,
-                    false,
-                    should_draw_pane_frames,
+                    PaneFrameRenderOptions {
+                        should_draw_pane_frames,
+                        mouse_scroll_resize: self.mouse_scroll_resize,
+                        mouse_hover_tips: self.mouse_hover_tips,
+                        ..Default::default()
+                    },
                     &self.mouse_hover_pane_id,
                     current_pane_group.clone(),
-                    false,
-                    false,
-                    self.mouse_scroll_resize,
-                    self.mouse_hover_tips,
                     self.dimmed_clients.clone(),
                 );
                 pane_contents_and_ui.set_frame_geom_override(Some(header_geom));
@@ -2582,6 +2584,22 @@ impl Tab {
                 }
                 Ok(())
             },
+            NewPanePlacement::AcmeColumn => self.new_acme_column(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                should_focus_pane,
+                client_id,
+                blocking_notification,
+            ),
+            NewPanePlacement::AcmePane => self.new_acme_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                should_focus_pane,
+                client_id,
+                blocking_notification,
+            ),
             NewPanePlacement::Floating(floating_pane_coordinates) => self.new_floating_pane(
                 pid,
                 initial_pane_title,
@@ -2839,6 +2857,177 @@ impl Tab {
             self.add_tiled_pane(new_pane, pid, false, focus_client_id)
         }
     }
+    pub fn new_acme_column(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        should_focus_pane: bool,
+        client_id: Option<ClientId>,
+        completion_tx: Option<NotificationEnd>,
+    ) -> Result<()> {
+        let err_context = || format!("failed to create new Acme column pane with id {pid:?}");
+        if should_focus_pane {
+            self.hide_floating_panes();
+        }
+        if self.floating_panes.panes_are_visible() {
+            return Ok(());
+        }
+        self.close_down_to_max_terminals()
+            .with_context(err_context)?;
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+
+        let Some(client_id) = client_id else {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        };
+        let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        };
+        if let Some(error_text) = self.tiled_panes.acme_insert_column_error(active_pane_id) {
+            self.senders
+                .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                    vec![active_pane_id],
+                    error_text,
+                ))
+                .with_context(err_context)?;
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        }
+
+        if let Some(new_pane) =
+            self.new_acme_terminal_pane(pid, initial_pane_title, invoked_with, completion_tx)?
+        {
+            self.tiled_panes
+                .insert_acme_column_after(active_pane_id, pid, new_pane)
+                .with_context(err_context)?;
+            self.set_should_clear_display_before_rendering();
+            if should_focus_pane {
+                self.tiled_panes.focus_pane(pid, client_id);
+            }
+            self.swap_layouts.set_is_tiled_damaged();
+        }
+        Ok(())
+    }
+
+    pub fn new_acme_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        should_focus_pane: bool,
+        client_id: Option<ClientId>,
+        completion_tx: Option<NotificationEnd>,
+    ) -> Result<()> {
+        let err_context = || format!("failed to create new Acme pane with id {pid:?}");
+        if should_focus_pane {
+            self.hide_floating_panes();
+        }
+        if self.floating_panes.panes_are_visible() {
+            return Ok(());
+        }
+        self.close_down_to_max_terminals()
+            .with_context(err_context)?;
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+
+        let Some(client_id) = client_id else {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        };
+        let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        };
+        if let Some(error_text) = self
+            .tiled_panes
+            .acme_insert_pane_below_error(active_pane_id)
+        {
+            self.senders
+                .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                    vec![active_pane_id],
+                    error_text,
+                ))
+                .with_context(err_context)?;
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .with_context(err_context)?;
+            return Ok(());
+        }
+
+        if let Some(new_pane) =
+            self.new_acme_terminal_pane(pid, initial_pane_title, invoked_with, completion_tx)?
+        {
+            self.tiled_panes
+                .insert_acme_pane_below(active_pane_id, pid, new_pane)
+                .with_context(err_context)?;
+            self.set_should_clear_display_before_rendering();
+            if should_focus_pane {
+                self.tiled_panes.focus_pane(pid, client_id);
+            }
+            self.swap_layouts.set_is_tiled_damaged();
+        }
+        Ok(())
+    }
+
+    fn new_acme_terminal_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        completion_tx: Option<NotificationEnd>,
+    ) -> Result<Option<Box<dyn Pane>>> {
+        let PaneId::Terminal(term_pid) = pid else {
+            log::error!("Acme pane actions only support terminal panes");
+            return Ok(None);
+        };
+        let next_terminal_position = self.get_next_terminal_position();
+        let mut new_terminal = TerminalPane::new(
+            term_pid,
+            PaneGeom::default(),
+            self.style,
+            next_terminal_position,
+            String::new(),
+            self.link_handler.clone(),
+            self.character_cell_size.clone(),
+            self.sixel_image_store.clone(),
+            self.kitty_image_store.clone(),
+            self.terminal_emulator_colors.clone(),
+            self.terminal_emulator_color_codes.clone(),
+            initial_pane_title,
+            invoked_with,
+            self.debug,
+            self.arrow_fonts,
+            self.styled_underlines,
+            self.osc8_hyperlinks,
+            self.explicitly_disable_kitty_keyboard_protocol,
+            completion_tx,
+        );
+        if let Some(supported) = self.kitty_host_support {
+            new_terminal.update_kitty_host_support(supported);
+        }
+        if let Some(supported) = self.sixel_host_support {
+            new_terminal.update_sixel_host_support(supported);
+        }
+        Ok(Some(Box::new(new_terminal)))
+    }
+
     pub fn new_floating_pane(
         &mut self,
         pid: PaneId,
@@ -4651,15 +4840,25 @@ impl Tab {
         } else {
             self.tiled_panes.get_active_pane_id(client_id)?
         };
+        let active_pane_is_tiled = self.tiled_panes.get_pane(active_pane_id).is_some();
         let active_terminal = &self
             .floating_panes
             .get(&active_pane_id)
             .or_else(|| self.tiled_panes.get_pane(active_pane_id))?;
-        active_terminal.cursor_coordinates(Some(client_id)).map(
+        active_terminal.cursor_coordinates(Some(client_id)).and_then(
             |(x_in_terminal, y_in_terminal, is_visible)| {
                 let x = active_terminal.x() + x_in_terminal;
                 let y = active_terminal.y() + y_in_terminal;
-                (x, y, is_visible)
+                let cursor_is_on_acme_title = active_pane_is_tiled
+                    && i32::try_from(y)
+                        .ok()
+                        .zip(u16::try_from(x).ok())
+                        .and_then(|(line, column)| {
+                            self.tiled_panes
+                                .acme_title_pane_id_at_position(&Position::new(line, column))
+                        })
+                        == Some(active_pane_id);
+                (!cursor_is_on_acme_title).then_some((x, y, is_visible))
             },
         )
     }
@@ -4729,6 +4928,198 @@ impl Tab {
             log::error!("No tiled pane with id: {:?} found", pane_id);
         }
     }
+    fn default_shell_terminal_action(&self) -> TerminalAction {
+        TerminalAction::RunCommand(RunCommand {
+            command: self.default_shell.clone(),
+            use_terminal_title: true,
+            ..Default::default()
+        })
+    }
+
+    /// Spawn a new terminal as an Acme column after the focused column.
+    pub fn spawn_acme_column_for_client(&self, client_id: ClientId) -> Result<()> {
+        self.senders
+            .send_to_pty(PtyInstruction::SpawnTerminal(
+                Some(self.default_shell_terminal_action()),
+                None,
+                NewPanePlacement::AcmeColumn,
+                false,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+                None,
+                false,
+            ))
+            .context("failed to request new Acme column")
+    }
+
+    /// Spawn a new terminal as an Acme pane below the focused pane.
+    pub fn spawn_acme_pane_for_client(&self, client_id: ClientId) -> Result<()> {
+        self.senders
+            .send_to_pty(PtyInstruction::SpawnTerminal(
+                Some(self.default_shell_terminal_action()),
+                None,
+                NewPanePlacement::AcmePane,
+                false,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+                None,
+                false,
+            ))
+            .context("failed to request new Acme pane")
+    }
+
+    pub fn acme_maximize_pane(&mut self, client_id: ClientId) {
+        if self.floating_panes.panes_are_visible() {
+            return;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
+            return;
+        };
+        match self.tiled_panes.acme_maximize_pane(active_pane_id) {
+            Ok(()) => {
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+            },
+            Err(e) => {
+                log::error!("Failed to maximize Acme pane: {:#}", e);
+                self.senders
+                    .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                        vec![active_pane_id],
+                        e.to_string(),
+                    ))
+                    .non_fatal();
+            },
+        }
+    }
+
+    pub fn acme_toggle_title_button_pane(&mut self, client_id: ClientId) {
+        if self.floating_panes.panes_are_visible() {
+            return;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
+            return;
+        };
+        match self.tiled_panes.acme_toggle_title_button_pane(active_pane_id) {
+            Ok(()) => {
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+            },
+            Err(e) => {
+                log::error!("Failed to toggle Acme title button pane: {:#}", e);
+                self.senders
+                    .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                        vec![active_pane_id],
+                        e.to_string(),
+                    ))
+                    .non_fatal();
+            },
+        }
+    }
+
+    /// Move an Acme pane across columns or reorder it within its current column.
+    pub fn move_or_reorder_acme_pane_with_position(
+        &mut self,
+        pane_id: PaneId,
+        start_position: Position,
+        release_position: Position,
+        client_id: ClientId,
+    ) -> bool {
+        if self.floating_panes.panes_are_visible() {
+            return false;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        match self.tiled_panes.move_or_reorder_acme_pane_with_position(
+            pane_id,
+            start_position,
+            release_position,
+        ) {
+            Ok(true) => {
+                self.focus_pane_with_id(pane_id, false, false, client_id)
+                    .non_fatal();
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+                true
+            },
+            Ok(false) => false,
+            Err(e) => {
+                log::error!("Failed to move Acme pane: {:#}", e);
+                self.senders
+                    .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                        vec![pane_id],
+                        e.to_string(),
+                    ))
+                    .non_fatal();
+                false
+            },
+        }
+    }
+
+    pub fn equalize_acme_pane_rows(&mut self, pane_id: PaneId, client_id: ClientId) -> bool {
+        if self.floating_panes.panes_are_visible() {
+            return false;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        match self.tiled_panes.equalize_acme_pane_rows(pane_id) {
+            Ok(()) => {
+                self.focus_pane_with_id(pane_id, false, false, client_id)
+                    .non_fatal();
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+                true
+            },
+            Err(e) => {
+                log::error!("Failed to equalize Acme pane rows: {:#}", e);
+                self.senders
+                    .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                        vec![pane_id],
+                        e.to_string(),
+                    ))
+                    .non_fatal();
+                false
+            },
+        }
+    }
+
+    pub fn equalize_acme_columns(&mut self, client_id: ClientId) {
+        if self.floating_panes.panes_are_visible() {
+            return;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        let active_pane_id = self.tiled_panes.get_active_pane_id(client_id);
+        match self.tiled_panes.equalize_acme_columns() {
+            Ok(()) => {
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+            },
+            Err(e) => {
+                log::error!("Failed to equalize Acme columns: {:#}", e);
+                if let Some(active_pane_id) = active_pane_id {
+                    self.senders
+                        .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                            vec![active_pane_id],
+                            e.to_string(),
+                        ))
+                        .non_fatal();
+                }
+            },
+        }
+    }
+
     pub fn unset_fullscreen(&mut self) {
         if self.floating_panes.fullscreen_is_active() {
             self.floating_panes.unset_fullscreen();
@@ -6500,7 +6891,10 @@ impl Tab {
             geom_to_compare_against.contains(point)
         };
 
-        let found_pane_id = if search_selectable {
+        let acme_title_pane_id = self.tiled_panes.acme_title_pane_id_at_position(point);
+        let found_pane_id = if let Some(pane_id) = acme_title_pane_id {
+            Some(pane_id)
+        } else if search_selectable {
             self.get_selectable_tiled_panes()
                 .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
                 .map(|(&id, _)| id)

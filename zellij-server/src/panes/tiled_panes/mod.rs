@@ -1,3 +1,4 @@
+mod acme;
 mod pane_resizer;
 mod stacked_panes;
 mod tiled_pane_grid;
@@ -13,17 +14,29 @@ mod pane_resizer_test_mock;
 mod pane_resizer_tests;
 
 use crate::resize_pty;
+use acme::{
+    acme_focus_target_after_removing_pane, acme_geometries_after_maximizing_pane,
+    acme_geometries_after_minimizing_pane, acme_geometries_after_moving_pane_to_position,
+    acme_geometries_after_removing_pane, acme_geometries_after_reordering_pane,
+    acme_geometries_after_restoring_pane_rows, acme_own_line_title_boundary_segments,
+    acme_own_line_title_pane_ids, acme_pane_is_maximized, acme_panes_before_own_line_title,
+    acme_previous_line_title_pane_ids, acme_rows_dimension, acme_title_pane_ids,
+    equalized_acme_row_heights, equalized_lengths, percent_dimension, resize_acme_column_pane,
+    AcmeColumn, AcmePaneGeometry, AcmePaneRowsSnapshot,
+    ACME_BOUNDARY_COLOR, ACME_COLLAPSED_PANE_ROWS, ACME_TITLE_BUTTON_COLUMN_OFFSET,
+};
 use tiled_pane_grid::{split, TiledPaneGrid, RESIZE_PERCENT};
 
 use crate::{
+    background_jobs::BackgroundJob,
     os_input_output::ServerOsApi,
     output::Output,
     panes::{ActivePanes, PaneId},
     plugins::PluginInstruction,
-    tab::{pane_info_for_pane, Pane, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH},
+    tab::{pane_info_for_pane, Pane, PaneEdge, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH},
     thread_bus::ThreadSenders,
     ui::boundaries::Boundaries,
-    ui::pane_contents_and_ui::PaneContentsAndUi,
+    ui::pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
     ClientId,
 };
 use stacked_panes::StackedPanes;
@@ -36,6 +49,7 @@ use zellij_utils::{
         options::PaneFrameStyle,
     },
     pane_size::{Offset, PaneGeom, Size, SizeInPixels, Viewport},
+    position::Position,
 };
 
 use std::{
@@ -64,6 +78,7 @@ fn pane_content_offset(position_and_size: &PaneGeom, viewport: &Viewport) -> (us
     (columns_offset, rows_offset)
 }
 
+
 pub struct TiledPanes {
     pub panes: BTreeMap<PaneId, Box<dyn Pane>>,
     display_area: Rc<RefCell<Size>>,
@@ -87,6 +102,7 @@ pub struct TiledPanes {
     client_id_to_boundaries: HashMap<ClientId, Boundaries>,
     tombstones_before_increase: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
     tombstones_before_decrease: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
+    acme_rows_before_maximize: Option<AcmePaneRowsSnapshot>,
     dimmed_clients: HashSet<ClientId>,
 }
 
@@ -132,6 +148,7 @@ impl TiledPanes {
             client_id_to_boundaries: HashMap::new(),
             tombstones_before_increase: None,
             tombstones_before_decrease: None,
+            acme_rows_before_maximize: None,
             dimmed_clients: HashSet::new(),
         }
     }
@@ -617,6 +634,16 @@ impl TiledPanes {
             .filter(|p| p.selectable() && !p.borderless())
             .count()
             == 1;
+        let acme_columns = draws_titles.then(|| self.acme_columns().ok()).flatten();
+        let acme_layout_uses_tag_titles = acme_columns.is_some();
+        let acme_own_line_title_pane_ids = acme_columns
+            .as_ref()
+            .map(|columns| acme_own_line_title_pane_ids(columns))
+            .unwrap_or_default();
+        let acme_panes_before_own_line_title = acme_columns
+            .as_ref()
+            .map(|columns| acme_panes_before_own_line_title(columns, &acme_own_line_title_pane_ids))
+            .unwrap_or_default();
         let viewport = *self.viewport.borrow();
         let no_ui_fullscreen_pane_id = if *self.fullscreen_covers_ui.borrow() {
             self.fullscreen_is_active
@@ -686,10 +713,19 @@ impl TiledPanes {
                 {
                     position_and_size = *position_and_size_of_stack;
                 };
-                let (pane_columns_offset, pane_rows_offset) =
+                let (pane_columns_offset, mut pane_rows_offset) =
                     pane_content_offset(&position_and_size, pane_viewport);
+                if acme_panes_before_own_line_title.contains(&pane.pid()) {
+                    pane_rows_offset = 0;
+                }
                 let reserve_title_row = if draws_titles {
-                    !pane_is_borderless && !single_selectable_tiled_pane && !is_one_liner_in_stack
+                    let pane_has_own_line_acme_title =
+                        acme_own_line_title_pane_ids.contains(&pane.pid());
+                    (pane_has_own_line_acme_title
+                        || (!acme_layout_uses_tag_titles
+                            && !single_selectable_tiled_pane
+                            && !is_one_liner_in_stack))
+                        && !pane_is_borderless
                 } else {
                     is_stacked && is_flexible
                 };
@@ -871,6 +907,348 @@ impl TiledPanes {
             self.relayout(SplitDirection::Horizontal);
         }
     }
+    pub fn can_insert_acme_column_after(&self, target_pane_id: PaneId) -> bool {
+        self.acme_insert_column_error(target_pane_id).is_none()
+    }
+
+    pub fn acme_insert_column_error(&self, target_pane_id: PaneId) -> Option<String> {
+        let columns = match self.acme_columns() {
+            Ok(columns) => columns,
+            Err(_) => return Some("NOT AN ACME LAYOUT".into()),
+        };
+        if !columns
+            .iter()
+            .any(|column| column.contains_pane(target_pane_id))
+        {
+            return Some("FOCUS AN ACME PANE".into());
+        }
+        if !self.can_equalize_column_count(columns.len() + 1) {
+            return Some("NOT ENOUGH WIDTH".into());
+        }
+        None
+    }
+
+    pub fn insert_acme_column_after(
+        &mut self,
+        target_pane_id: PaneId,
+        pane_id: PaneId,
+        mut pane: Box<dyn Pane>,
+    ) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let target_column_index = columns
+            .iter()
+            .position(|column| column.contains_pane(target_pane_id))
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        if !self.can_equalize_column_count(columns.len() + 1) {
+            return Err(anyhow!("Not enough room for another Acme column"));
+        }
+
+        let viewport = *self.viewport.borrow();
+        pane.set_geom(PaneGeom {
+            x: viewport.x,
+            y: viewport.y,
+            rows: percent_dimension(viewport.rows, viewport.rows),
+            cols: percent_dimension(viewport.cols, viewport.cols),
+            ..Default::default()
+        });
+        self.panes.insert(pane_id, pane);
+
+        let mut column_pane_ids: Vec<Vec<PaneId>> =
+            columns.iter().map(AcmeColumn::pane_ids).collect();
+        column_pane_ids.insert(target_column_index + 1, vec![pane_id]);
+        self.apply_equalized_acme_column_widths(&column_pane_ids)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
+    pub fn can_insert_acme_pane_below(&self, target_pane_id: PaneId) -> bool {
+        self.acme_insert_pane_below_error(target_pane_id).is_none()
+    }
+
+    pub fn acme_insert_pane_below_error(&self, target_pane_id: PaneId) -> Option<String> {
+        let columns = match self.acme_columns() {
+            Ok(columns) => columns,
+            Err(_) => return Some("NOT AN ACME LAYOUT".into()),
+        };
+        let Some((column, target_pane_index, focused_geom)) = columns.iter().find_map(|column| {
+            column
+                .pane_geometries
+                .iter()
+                .enumerate()
+                .find(|(_, pane_geometry)| pane_geometry.pane_id == target_pane_id)
+                .map(|(pane_index, pane_geometry)| (column, pane_index, pane_geometry.geom))
+        }) else {
+            return Some("FOCUS AN ACME PANE".into());
+        };
+        if !focused_geom.rows.is_percent() {
+            return Some("EXPAND PANE BEFORE SPLIT".into());
+        }
+        let mut row_heights: Vec<usize> = column
+            .pane_geometries
+            .iter()
+            .map(|pane_geometry| pane_geometry.geom.rows.as_usize())
+            .collect();
+        row_heights.insert(target_pane_index + 1, focused_geom.rows.as_usize());
+        if !self.can_equalize_acme_pane_rows(&row_heights) {
+            return Some("ACME PANE TOO SHORT".into());
+        }
+        None
+    }
+
+    pub fn insert_acme_pane_below(
+        &mut self,
+        target_pane_id: PaneId,
+        pane_id: PaneId,
+        mut pane: Box<dyn Pane>,
+    ) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let column = columns
+            .iter()
+            .find(|column| column.contains_pane(target_pane_id))
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        let target_pane_index = column
+            .pane_geometries
+            .iter()
+            .position(|pane_geometry| pane_geometry.pane_id == target_pane_id)
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        let focused_geom = column.pane_geometries[target_pane_index].geom;
+        if !focused_geom.rows.is_percent() {
+            return Err(anyhow!("Expand Acme pane before splitting it"));
+        }
+        let mut row_heights: Vec<usize> = column
+            .pane_geometries
+            .iter()
+            .map(|pane_geometry| pane_geometry.geom.rows.as_usize())
+            .collect();
+        row_heights.insert(target_pane_index + 1, focused_geom.rows.as_usize());
+        if !self.can_equalize_acme_pane_rows(&row_heights) {
+            return Err(anyhow!("Not enough room for another Acme pane"));
+        }
+
+        let mut new_geom = focused_geom;
+        new_geom.logical_position = None;
+        pane.set_geom(new_geom);
+        self.panes.insert(pane_id, pane);
+
+        let mut column_pane_ids = column.pane_ids();
+        column_pane_ids.insert(target_pane_index + 1, pane_id);
+        self.apply_equalized_acme_pane_rows(&column_pane_ids, column.x, column.cols)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
+    /// Remove a pane from an Acme-style layout while keeping columns contiguous.
+    pub fn remove_acme_pane(&mut self, pane_id: PaneId) -> Result<Option<Box<dyn Pane>>> {
+        let columns = match self.acme_columns() {
+            Ok(columns) => columns,
+            Err(_) => return Ok(None),
+        };
+        if !columns.iter().any(|column| column.contains_pane(pane_id)) {
+            return Ok(None);
+        }
+        let focus_target = acme_focus_target_after_removing_pane(&columns, pane_id);
+
+        let viewport = *self.viewport.borrow();
+        let planned_geometries = acme_geometries_after_removing_pane(&columns, pane_id, viewport)?;
+        self.apply_acme_geometries(planned_geometries)?;
+
+        let closed_pane = self.panes.remove(&pane_id);
+        if let Some(focus_target) = focus_target.filter(|pane_id| self.panes.contains_key(pane_id))
+        {
+            self.move_clients_out_of_pane_to(pane_id, focus_target);
+        } else {
+            self.move_clients_out_of_pane(pane_id);
+        }
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(closed_pane)
+    }
+
+    fn apply_acme_geometries(&mut self, planned_geometries: Vec<(PaneId, PaneGeom)>) -> Result<()> {
+        for (pane_id, geom) in planned_geometries {
+            let pane = self
+                .panes
+                .get_mut(&pane_id)
+                .ok_or_else(|| anyhow!("Missing pane in Acme column"))?;
+            pane.set_geom(geom);
+        }
+        Ok(())
+    }
+
+    pub fn acme_maximize_pane(&mut self, target_pane_id: PaneId) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let column = columns
+            .iter()
+            .find(|column| column.contains_pane(target_pane_id))
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        if acme_pane_is_maximized(column, target_pane_id) {
+            return Ok(());
+        }
+        let viewport = *self.viewport.borrow();
+        let planned_geometries =
+            acme_geometries_after_maximizing_pane(&columns, target_pane_id, viewport)?;
+        if planned_geometries.is_empty() {
+            return Ok(());
+        }
+        if !self
+            .acme_rows_before_maximize
+            .as_ref()
+            .map(|snapshot| snapshot.matches_column(column))
+            .unwrap_or(false)
+        {
+            self.acme_rows_before_maximize = Some(AcmePaneRowsSnapshot::new(column, target_pane_id));
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
+    pub fn acme_toggle_title_button_pane(&mut self, target_pane_id: PaneId) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let column = columns
+            .iter()
+            .find(|column| column.contains_pane(target_pane_id))
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        if acme_pane_is_maximized(column, target_pane_id) {
+            if self.acme_restore_pane_rows()? {
+                return Ok(());
+            }
+            self.acme_minimize_pane(target_pane_id)
+        } else {
+            self.acme_maximize_pane(target_pane_id)
+        }
+    }
+
+    fn acme_restore_pane_rows(&mut self) -> Result<bool> {
+        let Some(snapshot) = self.acme_rows_before_maximize.take() else {
+            return Ok(false);
+        };
+        let columns = self.acme_columns()?;
+        let viewport = *self.viewport.borrow();
+        let planned_geometries =
+            acme_geometries_after_restoring_pane_rows(&columns, &snapshot, viewport)?;
+        if planned_geometries.is_empty() {
+            return Ok(false);
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(true)
+    }
+
+    fn acme_minimize_pane(&mut self, target_pane_id: PaneId) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let viewport = *self.viewport.borrow();
+        let (planned_geometries, focus_target) =
+            acme_geometries_after_minimizing_pane(&columns, target_pane_id, viewport)?;
+        if planned_geometries.is_empty() {
+            return Ok(());
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.acme_rows_before_maximize = None;
+        if let Some(focus_target) = focus_target {
+            self.move_clients_out_of_pane_to(target_pane_id, focus_target);
+        }
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
+    /// Move an Acme pane into the column under `position`.
+    pub fn move_acme_pane_to_position(
+        &mut self,
+        pane_id: PaneId,
+        position: Position,
+    ) -> Result<bool> {
+        let columns = self.acme_columns()?;
+        let viewport = *self.viewport.borrow();
+        let planned_geometries = acme_geometries_after_moving_pane_to_position(
+            &columns,
+            pane_id,
+            position.line(),
+            position.column(),
+            viewport,
+            MIN_TERMINAL_HEIGHT,
+        )?;
+        if planned_geometries.is_empty() {
+            return Ok(false);
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(true)
+    }
+
+    /// Reorder an Acme pane within its current column by mouse release position.
+    pub fn reorder_acme_pane_with_position(
+        &mut self,
+        pane_id: PaneId,
+        start_position: Position,
+        release_position: Position,
+    ) -> Result<bool> {
+        let columns = self.acme_columns()?;
+        let viewport = *self.viewport.borrow();
+        let planned_geometries = acme_geometries_after_reordering_pane(
+            &columns,
+            pane_id,
+            start_position.line(),
+            release_position.line(),
+            release_position.column(),
+            viewport,
+        )?;
+        if planned_geometries.is_empty() {
+            return Ok(false);
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(true)
+    }
+
+    /// Move across columns or reorder within the same column from a handle drag.
+    pub fn move_or_reorder_acme_pane_with_position(
+        &mut self,
+        pane_id: PaneId,
+        start_position: Position,
+        release_position: Position,
+    ) -> Result<bool> {
+        if self.move_acme_pane_to_position(pane_id, release_position)? {
+            return Ok(true);
+        }
+        self.reorder_acme_pane_with_position(pane_id, start_position, release_position)
+    }
+
+    pub fn equalize_acme_pane_rows(&mut self, target_pane_id: PaneId) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let column = columns
+            .iter()
+            .find(|column| column.contains_pane(target_pane_id))
+            .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
+        self.apply_equalized_acme_pane_rows(&column.pane_ids(), column.x, column.cols)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
+    pub fn equalize_acme_columns(&mut self) -> Result<()> {
+        let columns = self.acme_columns()?;
+        let column_pane_ids: Vec<Vec<PaneId>> = columns.iter().map(AcmeColumn::pane_ids).collect();
+        self.apply_equalized_acme_column_widths(&column_pane_ids)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(())
+    }
+
     pub fn focus_pane_for_all_clients(&mut self, pane_id: PaneId) {
         let connected_clients: Vec<ClientId> =
             self.connected_clients.borrow().iter().copied().collect();
@@ -1170,6 +1548,24 @@ impl TiledPanes {
                 .map(|(client_id, pane_id)| (*client_id, *pane_id))
                 .collect()
         };
+        let acme_columns = self
+            .pane_frame_style
+            .draws_titles()
+            .then(|| self.acme_columns().ok())
+            .flatten();
+        let acme_layout_uses_tag_titles = acme_columns.is_some();
+        let acme_title_pane_ids = acme_columns
+            .as_ref()
+            .map(|columns| acme_title_pane_ids(columns))
+            .unwrap_or_default();
+        let acme_previous_line_title_pane_ids = acme_columns
+            .as_ref()
+            .map(|columns| acme_previous_line_title_pane_ids(columns))
+            .unwrap_or_default();
+        let acme_own_line_title_boundary_segments = acme_columns
+            .as_ref()
+            .map(|columns| acme_own_line_title_boundary_segments(columns))
+            .unwrap_or_default();
         let (stacked_pane_ids_under_flexible_pane, stacked_pane_ids_over_flexible_pane) = {
             StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
                 .stacked_pane_ids_under_and_over_flexible_panes()
@@ -1257,6 +1653,12 @@ impl TiledPanes {
                     None
                 };
                 let pane_has_guest_modal = pane.has_guest_modal_for_any_client();
+                let pane_has_acme_title = acme_title_pane_ids.contains(&pane.pid());
+                let omit_title = if acme_layout_uses_tag_titles {
+                    !pane_has_acme_title
+                } else {
+                    omit_pane_title && reserved_rows_for_pane == 0
+                };
                 let mut pane_contents_and_ui = PaneContentsAndUi::new(
                     pane,
                     output,
@@ -1264,15 +1666,21 @@ impl TiledPanes {
                     &active_panes,
                     multiple_users_exist_in_session,
                     None,
-                    pane_is_stacked_under,
-                    pane_is_stacked_over,
-                    should_draw_pane_frames,
+                    PaneFrameRenderOptions {
+                        pane_is_stacked_under,
+                        pane_is_stacked_over,
+                        should_draw_pane_frames,
+                        frameless_title_fills_width: self.pane_frame_style.draws_titles(),
+                        frameless_title_on_previous_line: acme_previous_line_title_pane_ids
+                            .contains(&pane.pid()),
+                        acme_title: pane_has_acme_title,
+                        show_help_text,
+                        omit_title,
+                        mouse_scroll_resize,
+                        mouse_hover_tips,
+                    },
                     &mouse_hover_pane_id,
                     current_pane_group.clone(),
-                    show_help_text,
-                    omit_pane_title && reserved_rows_for_pane == 0,
-                    mouse_scroll_resize,
-                    mouse_hover_tips,
                     self.dimmed_clients.clone(),
                 );
                 pane_contents_and_ui.set_frame_geom_override(visible_member_frame_override);
@@ -1308,15 +1716,17 @@ impl TiledPanes {
                     } else if (self.pane_frame_style.draws_titles() || pane_is_stacked)
                         && reserved_rows_for_pane == 0
                     {
-                        pane_contents_and_ui
-                            .render_pane_frame(
-                                *client_id,
-                                client_mode,
-                                self.session_is_mirrored,
-                                is_floating,
-                                pane_is_selectable,
-                            )
-                            .with_context(err_context)?;
+                        if !pane_has_acme_title {
+                            pane_contents_and_ui
+                                .render_pane_frame(
+                                    *client_id,
+                                    client_mode,
+                                    self.session_is_mirrored,
+                                    is_floating,
+                                    pane_is_selectable,
+                                )
+                                .with_context(err_context)?;
+                        }
                         let boundaries = client_id_to_boundaries
                             .entry(*client_id)
                             .or_insert_with(|| Boundaries::new(*self.viewport.borrow()));
@@ -1385,7 +1795,14 @@ impl TiledPanes {
             }
         }
         // render boundaries if needed
-        for (client_id, boundaries) in client_id_to_boundaries {
+        for (client_id, mut boundaries) in client_id_to_boundaries {
+            if acme_layout_uses_tag_titles {
+                boundaries.set_color(ACME_BOUNDARY_COLOR);
+            }
+            boundaries.remove_horizontal_segments(&acme_own_line_title_boundary_segments);
+            if acme_layout_uses_tag_titles {
+                boundaries.use_heavy_verticals();
+            }
             let mut boundaries_to_render = boundaries
                 .render(self.client_id_to_boundaries.get(&client_id))
                 .with_context(err_context)?;
@@ -1396,6 +1813,67 @@ impl TiledPanes {
             output
                 .add_character_chunks_to_client(client_id, boundaries_to_render, None)
                 .with_context(err_context)?;
+        }
+        if !acme_title_pane_ids.is_empty() {
+            for (pane_id, pane) in self.panes.iter_mut() {
+                if !acme_title_pane_ids.contains(pane_id) || self.panes_to_hide.contains(pane_id) {
+                    continue;
+                }
+                let pane_is_selectable = pane.selectable();
+                let mut pane_contents_and_ui = PaneContentsAndUi::new(
+                    pane,
+                    output,
+                    self.style,
+                    &active_panes,
+                    multiple_users_exist_in_session,
+                    None,
+                    PaneFrameRenderOptions {
+                        frameless_title_fills_width: true,
+                        frameless_title_on_previous_line: acme_previous_line_title_pane_ids
+                            .contains(pane_id),
+                        acme_title: true,
+                        mouse_scroll_resize,
+                        mouse_hover_tips,
+                        ..Default::default()
+                    },
+                    mouse_hover_pane_id,
+                    current_pane_group.clone(),
+                    self.dimmed_clients.clone(),
+                );
+                pane_contents_and_ui.force_render_frame();
+                for client_id in &connected_clients {
+                    let client_mode = self
+                        .mode_info
+                        .borrow()
+                        .get(client_id)
+                        .unwrap_or(&self.default_mode_info)
+                        .mode;
+                    pane_contents_and_ui
+                        .render_pane_frame(
+                            *client_id,
+                            client_mode,
+                            self.session_is_mirrored,
+                            false,
+                            pane_is_selectable,
+                        )
+                        .with_context(err_context)?;
+                }
+            }
+        }
+        if !floating_panes_are_visible
+            && acme_layout_uses_tag_titles
+            && self
+                .panes
+                .iter()
+                .any(|(pane_id, pane)| {
+                    acme_title_pane_ids.contains(pane_id)
+                        && !self.panes_to_hide.contains(pane_id)
+                        && pane.command_running_since().is_some()
+                })
+        {
+            let _ = self
+                .senders
+                .send_to_background_jobs(BackgroundJob::AnimateLongRunningCommandTitles);
         }
         if floating_panes_are_visible {
             // we do this here so that when they are toggled off, we will make sure to re-render the title
@@ -1976,6 +2454,144 @@ impl TiledPanes {
         Ok(pane_size_changed)
     }
 
+    /// Snapshot the initial Acme column rows for a mouse resize drag.
+    pub fn acme_resize_snapshot(&self, pane_id: PaneId) -> Option<Vec<(PaneId, PaneGeom)>> {
+        let columns = self.acme_columns().ok()?;
+        let column = columns
+            .iter()
+            .find(|column| column.contains_pane(pane_id))?;
+        Some(
+            column
+                .pane_geometries
+                .iter()
+                .map(|pane_geometry| (pane_geometry.pane_id, pane_geometry.geom))
+                .collect(),
+        )
+    }
+
+    /// Resize an Acme pane from the drag-start row snapshot to avoid cumulative drift.
+    pub fn resize_acme_pane_with_snapshot(
+        &mut self,
+        pane_id: PaneId,
+        snapshot: &[(PaneId, PaneGeom)],
+        strategies: &[ResizeStrategy],
+        row_delta: usize,
+    ) -> Result<bool> {
+        let vertical_strategies: Vec<&ResizeStrategy> = strategies
+            .iter()
+            .filter(|strategy| matches!(strategy.direction, Some(Direction::Up | Direction::Down)))
+            .collect();
+        if vertical_strategies.is_empty() && row_delta > 0 {
+            return Ok(false);
+        }
+        let Some(pane_index) = snapshot
+            .iter()
+            .position(|(snapshot_pane_id, _geom)| *snapshot_pane_id == pane_id)
+        else {
+            return Ok(false);
+        };
+        let Some((_, first_geom)) = snapshot.first() else {
+            return Ok(false);
+        };
+        let viewport = *self.viewport.borrow();
+        let mut column = AcmeColumn {
+            x: first_geom.x,
+            cols: first_geom.cols.as_usize(),
+            pane_geometries: snapshot
+                .iter()
+                .map(|(pane_id, geom)| AcmePaneGeometry {
+                    pane_id: *pane_id,
+                    geom: *geom,
+                })
+                .collect(),
+        };
+        if row_delta > 0 {
+            for strategy in vertical_strategies {
+                resize_acme_column_pane(&mut column, pane_index, strategy, row_delta, viewport)?;
+            }
+        }
+
+        let mut changed = false;
+        for pane_geometry in column.pane_geometries {
+            let pane = self
+                .panes
+                .get_mut(&pane_geometry.pane_id)
+                .ok_or_else(|| anyhow!("Missing pane in Acme column"))?;
+            if pane.position_and_size() != pane_geometry.geom {
+                changed = true;
+                pane.set_geom(pane_geometry.geom);
+            }
+        }
+        if changed {
+            self.acme_rows_before_maximize = None;
+            self.reapply_pane_frames();
+            self.set_force_render();
+        }
+        Ok(changed)
+    }
+
+    /// Resize an Acme pane vertically while preserving one-row collapsed titles.
+    fn resize_acme_pane_with_strategies(
+        &mut self,
+        pane_id: PaneId,
+        strategies: &[ResizeStrategy],
+        change_by: (f64, f64),
+    ) -> Result<bool> {
+        let vertical_strategies: Vec<&ResizeStrategy> = strategies
+            .iter()
+            .filter(|strategy| matches!(strategy.direction, Some(Direction::Up | Direction::Down)))
+            .collect();
+        if vertical_strategies.is_empty() {
+            return Ok(false);
+        }
+
+        let viewport = *self.viewport.borrow();
+        let row_delta = resize_percent_to_cells(change_by.1, viewport.rows);
+        if row_delta == 0 {
+            return Ok(false);
+        }
+
+        let mut columns = match self.acme_columns() {
+            Ok(columns) => columns,
+            Err(_) => return Ok(false),
+        };
+        let Some(column_index) = columns
+            .iter()
+            .position(|column| column.contains_pane(pane_id))
+        else {
+            return Ok(false);
+        };
+        let pane_index = columns[column_index]
+            .pane_geometries
+            .iter()
+            .position(|pane_geometry| pane_geometry.pane_id == pane_id)
+            .ok_or_else(|| anyhow!("Pane is not in an Acme column"))?;
+
+        let mut changed = false;
+        for strategy in vertical_strategies {
+            changed |= resize_acme_column_pane(
+                &mut columns[column_index],
+                pane_index,
+                strategy,
+                row_delta,
+                viewport,
+            )?;
+        }
+        if changed {
+            for pane_geometry in &columns[column_index].pane_geometries {
+                let pane = self
+                    .panes
+                    .get_mut(&pane_geometry.pane_id)
+                    .ok_or_else(|| anyhow!("Missing pane in Acme column"))?;
+                pane.set_geom(pane_geometry.geom);
+            }
+            self.acme_rows_before_maximize = None;
+            self.reapply_pane_frames();
+            self.set_force_render();
+        }
+        Ok(true)
+    }
+
     pub fn resize_pane_with_strategies(
         &mut self,
         pane_id: PaneId,
@@ -1983,6 +2599,10 @@ impl TiledPanes {
         change_by: (f64, f64),
     ) -> Result<()> {
         let err_context = || format!("failed to resize pane {:?} with strategies", pane_id);
+
+        if self.resize_acme_pane_with_strategies(pane_id, strategies, change_by)? {
+            return Ok(());
+        }
 
         let mut pane_grid = TiledPaneGrid::new(
             &mut self.panes,
@@ -2733,11 +3353,68 @@ impl TiledPanes {
             None => self.active_panes.clear(&mut self.panes),
         }
     }
+    fn move_clients_out_of_pane_to(&mut self, pane_id: PaneId, next_active_pane_id: PaneId) {
+        let active_panes: Vec<(ClientId, PaneId)> = self
+            .active_panes
+            .iter()
+            .map(|(cid, pid)| (*cid, *pid))
+            .collect();
+        if !active_panes
+            .iter()
+            .any(|(_client_id, active_pane_id)| *active_pane_id == pane_id)
+        {
+            return;
+        }
+
+        if self
+            .panes
+            .get(&next_active_pane_id)
+            .map(|p| p.current_geom().is_stacked())
+            .unwrap_or(false)
+        {
+            self.expand_pane_in_stack(next_active_pane_id);
+        }
+        let last_active_pane_id =
+            self.most_recent_selectable_pane_id_excluding(&[pane_id, next_active_pane_id]);
+        for (client_id, active_pane_id) in active_panes {
+            if active_pane_id == pane_id {
+                self.active_panes
+                    .insert(client_id, next_active_pane_id, &mut self.panes);
+                if let Some(last_active_pane_id) = last_active_pane_id {
+                    self.active_panes
+                        .set_last_pane(client_id, last_active_pane_id);
+                }
+            }
+        }
+    }
+
+    fn most_recent_selectable_pane_id_excluding(&self, pane_ids: &[PaneId]) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .filter(|(pane_id, pane)| {
+                !pane_ids.contains(pane_id)
+                    && !self.panes_to_hide.contains(pane_id)
+                    && pane.selectable()
+            })
+            .max_by_key(|(_pane_id, pane)| pane.active_at())
+            .map(|(pane_id, _pane)| *pane_id)
+    }
+
     pub fn extract_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
         self.reset_boundaries();
         self.panes.remove(&pane_id)
     }
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
+        match self.remove_acme_pane(pane_id) {
+            Ok(Some(closed_pane)) => return Some(closed_pane),
+            Ok(None) => {},
+            Err(e) => {
+                Err::<(), _>(e)
+                    .with_context(|| format!("failed to remove Acme pane {pane_id:?}"))
+                    .non_fatal();
+            },
+        }
+
         let mut pane_grid = TiledPaneGrid::new(
             &mut self.panes,
             &self.panes_to_hide,
@@ -3167,6 +3844,243 @@ impl TiledPanes {
             *self.viewport.borrow(),
         );
         pane_grid.next_selectable_pane_id_to_the_right(&pane_id)
+    }
+
+    /// Return whether a pane belongs to the current Acme layout.
+    pub fn pane_is_in_acme_column(&self, pane_id: PaneId) -> bool {
+        self.acme_columns()
+            .map(|columns| columns.iter().any(|column| column.contains_pane(pane_id)))
+            .unwrap_or(false)
+    }
+
+    /// Return the Acme pane whose rendered title owns this screen position.
+    pub fn acme_title_pane_id_at_position(&self, position: &Position) -> Option<PaneId> {
+        self.acme_title_hit_at_position(position)
+            .map(|(pane_id, _, _)| pane_id)
+    }
+
+    /// Return the Acme pane whose title button owns this screen position.
+    pub fn acme_title_button_pane_id_at_position(&self, position: &Position) -> Option<PaneId> {
+        let (pane_id, _, geom) = self.acme_title_hit_at_position(position)?;
+        let button_column = geom.x + ACME_TITLE_BUTTON_COLUMN_OFFSET;
+        if position.column() >= button_column.saturating_sub(1)
+            && position.column() <= button_column + 1
+        {
+            Some(pane_id)
+        } else {
+            None
+        }
+    }
+
+    /// Return the resize edge represented by an Acme pane title at this position.
+    pub fn acme_title_edge_at_position(
+        &self,
+        pane_id: PaneId,
+        position: &Position,
+    ) -> Option<PaneEdge> {
+        let (title_pane_id, pane_index, _geom) = self.acme_title_hit_at_position(position)?;
+        if title_pane_id != pane_id {
+            return None;
+        }
+        let column = self
+            .acme_columns()
+            .ok()?
+            .into_iter()
+            .find(|column| column.contains_pane(pane_id))?;
+        if column.pane_geometries.len() <= 1 {
+            return None;
+        }
+        if pane_index == 0 {
+            None
+        } else {
+            Some(PaneEdge::Top)
+        }
+    }
+
+    fn acme_title_hit_at_position(&self, position: &Position) -> Option<(PaneId, usize, PaneGeom)> {
+        if !self.pane_frame_style.draws_titles() {
+            return None;
+        }
+        let columns = self.acme_columns().ok()?;
+        let previous_line_title_pane_ids = acme_previous_line_title_pane_ids(&columns);
+        for column in columns {
+            if position.column() < column.x || position.column() >= column.x + column.cols {
+                continue;
+            }
+            for (pane_index, pane_geometry) in column.pane_geometries.iter().enumerate().rev() {
+                let title_y = if previous_line_title_pane_ids.contains(&pane_geometry.pane_id) {
+                    pane_geometry.geom.y.saturating_sub(1)
+                } else {
+                    pane_geometry.geom.y
+                };
+                if position.line() == title_y as isize {
+                    return Some((pane_geometry.pane_id, pane_index, pane_geometry.geom));
+                }
+            }
+        }
+        None
+    }
+
+    fn acme_columns(&self) -> Result<Vec<AcmeColumn>> {
+        let viewport = *self.viewport.borrow();
+        let mut grouped_panes: BTreeMap<(usize, usize), Vec<AcmePaneGeometry>> = BTreeMap::new();
+        for (pane_id, pane) in &self.panes {
+            if self.panes_to_hide.contains(pane_id) || !pane.selectable() {
+                continue;
+            }
+            let geom = pane.position_and_size();
+            if !pane_geom_is_inside_viewport(&viewport, &geom) {
+                continue;
+            }
+            if geom.stacked.is_some() {
+                return Err(anyhow!("Acme columns cannot contain stacked panes"));
+            }
+            grouped_panes
+                .entry((geom.x, geom.cols.as_usize()))
+                .or_default()
+                .push(AcmePaneGeometry {
+                    pane_id: *pane_id,
+                    geom,
+                });
+        }
+        if grouped_panes.is_empty() {
+            return Err(anyhow!("No tiled panes in viewport"));
+        }
+
+        let mut columns = vec![];
+        for ((x, cols), mut pane_geometries) in grouped_panes {
+            pane_geometries.sort_by_key(|pane_geometry| pane_geometry.geom.y);
+            let mut next_y = viewport.y;
+            for pane_geometry in &pane_geometries {
+                if pane_geometry.geom.x != x || pane_geometry.geom.cols.as_usize() != cols {
+                    return Err(anyhow!("Pane width changed inside Acme column"));
+                }
+                if pane_geometry.geom.y != next_y {
+                    return Err(anyhow!("Acme column panes must be vertically contiguous"));
+                }
+                next_y += pane_geometry.geom.rows.as_usize();
+            }
+            if next_y != viewport.y + viewport.rows {
+                return Err(anyhow!("Acme column does not fill the viewport height"));
+            }
+            columns.push(AcmeColumn {
+                x,
+                cols,
+                pane_geometries,
+            });
+        }
+
+        columns.sort_by_key(|column| column.x);
+        let mut next_x = viewport.x;
+        for column in &columns {
+            if column.x != next_x {
+                return Err(anyhow!("Acme columns must be horizontally contiguous"));
+            }
+            next_x += column.cols;
+        }
+        if next_x != viewport.x + viewport.cols {
+            return Err(anyhow!("Acme columns do not fill the viewport width"));
+        }
+        Ok(columns)
+    }
+
+    fn can_equalize_column_count(&self, column_count: usize) -> bool {
+        let viewport = *self.viewport.borrow();
+        column_count > 0 && viewport.cols >= column_count * MIN_TERMINAL_WIDTH
+    }
+
+    fn can_equalize_acme_pane_rows(&self, row_heights: &[usize]) -> bool {
+        if row_heights.is_empty() {
+            return false;
+        }
+        let viewport = *self.viewport.borrow();
+        let collapsed_pane_count = row_heights
+            .iter()
+            .filter(|&&rows| rows == ACME_COLLAPSED_PANE_ROWS)
+            .count();
+        let expanded_pane_count = row_heights.len() - collapsed_pane_count;
+        if expanded_pane_count == 0 {
+            viewport.rows >= row_heights.len() * MIN_TERMINAL_HEIGHT
+        } else {
+            viewport.rows
+                >= collapsed_pane_count * ACME_COLLAPSED_PANE_ROWS
+                    + expanded_pane_count * MIN_TERMINAL_HEIGHT
+        }
+    }
+
+    fn apply_equalized_acme_column_widths(
+        &mut self,
+        column_pane_ids: &[Vec<PaneId>],
+    ) -> Result<()> {
+        if !self.can_equalize_column_count(column_pane_ids.len()) {
+            return Err(anyhow!("Not enough room to equalize Acme columns"));
+        }
+        let viewport = *self.viewport.borrow();
+        let widths = equalized_lengths(viewport.cols, column_pane_ids.len());
+        let mut x = viewport.x;
+        for (pane_ids, width) in column_pane_ids.iter().zip(widths) {
+            let cols = percent_dimension(width, viewport.cols);
+            for pane_id in pane_ids {
+                let pane = self
+                    .panes
+                    .get_mut(pane_id)
+                    .ok_or_else(|| anyhow!("Missing pane in Acme column"))?;
+                let mut geom = pane.position_and_size();
+                geom.x = x;
+                geom.cols = cols;
+                geom.stacked = None;
+                pane.set_geom(geom);
+            }
+            x += width;
+        }
+        Ok(())
+    }
+
+    fn apply_equalized_acme_pane_rows(
+        &mut self,
+        column_pane_ids: &[PaneId],
+        column_x: usize,
+        column_width: usize,
+    ) -> Result<()> {
+        let viewport = *self.viewport.borrow();
+        let existing_rows: Vec<usize> = column_pane_ids
+            .iter()
+            .map(|pane_id| {
+                self.panes
+                    .get(pane_id)
+                    .map(|pane| pane.position_and_size().rows.as_usize())
+                    .ok_or_else(|| anyhow!("Missing pane in Acme column"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !self.can_equalize_acme_pane_rows(&existing_rows) {
+            return Err(anyhow!("Not enough room to equalize Acme panes"));
+        }
+        let rows = equalized_acme_row_heights(&existing_rows, viewport.rows);
+        let cols = percent_dimension(column_width, viewport.cols);
+        let mut y = viewport.y;
+        for (pane_id, pane_rows) in column_pane_ids.iter().zip(rows) {
+            let pane = self
+                .panes
+                .get_mut(pane_id)
+                .ok_or_else(|| anyhow!("Missing pane in Acme column"))?;
+            let mut geom = pane.position_and_size();
+            geom.x = column_x;
+            geom.y = y;
+            geom.cols = cols;
+            geom.rows = acme_rows_dimension(pane_rows, viewport.rows);
+            geom.stacked = None;
+            pane.set_geom(geom);
+            y += pane_rows;
+        }
+        Ok(())
+    }
+}
+
+fn resize_percent_to_cells(percent: f64, full_size: usize) -> usize {
+    if percent <= 0.0 || full_size == 0 {
+        0
+    } else {
+        (((percent / 100.0) * full_size as f64).round() as usize).max(1)
     }
 }
 
