@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use zellij_utils::consts::HOST_CLIPBOARD_PASTE_REQUEST_PREFIX;
 use zellij_utils::errors::FatalError;
 use zellij_utils::shared::web_server_base_url;
 
@@ -1483,46 +1484,56 @@ pub fn start_client(
                 query_bytes,
                 resolve_async: true,
             } => {
-                {
-                    let mut stdin_ansi_parser = stdin_ansi_parser.lock().unwrap();
-                    if let Some((stale_token, stale_reply_bytes)) =
-                        stdin_ansi_parser.take_active_clipboard_forward()
+                if let Some(selection) = host_clipboard_paste_request_selection(&query_bytes) {
+                    let reply_bytes = read_host_clipboard(selection).unwrap_or_default();
+                    let _ = send_input_instructions.send(
+                        InputInstruction::ForwardedReplyFromHostComplete { token, reply_bytes },
+                    );
+                } else {
                     {
-                        log::warn!(
-                            "clipboard forward slot for token {} was still open when token {} was \
-                             dispatched ({} accumulated bytes); closing it out",
-                            stale_token,
-                            token,
-                            stale_reply_bytes.len(),
-                        );
-                        let _ = send_input_instructions.send(
-                            InputInstruction::ForwardedReplyFromHostComplete {
-                                token: stale_token,
-                                reply_bytes: stale_reply_bytes,
-                            },
-                        );
+                        let mut stdin_ansi_parser = stdin_ansi_parser.lock().unwrap();
+                        if let Some((stale_token, stale_reply_bytes)) =
+                            stdin_ansi_parser.take_active_clipboard_forward()
+                        {
+                            log::warn!(
+                                "clipboard forward slot for token {} was still open when token {} was \
+                                 dispatched ({} accumulated bytes); closing it out",
+                                stale_token,
+                                token,
+                                stale_reply_bytes.len(),
+                            );
+                            let _ = send_input_instructions.send(
+                                InputInstruction::ForwardedReplyFromHostComplete {
+                                    token: stale_token,
+                                    reply_bytes: stale_reply_bytes,
+                                },
+                            );
+                        }
+                        stdin_ansi_parser.open_clipboard_forward(token);
                     }
-                    stdin_ansi_parser.open_clipboard_forward(token);
+                    let runtime = stdin_ansi_parser::forward_timeout_runtime();
+                    let parser_for_timer = stdin_ansi_parser.clone();
+                    let sender_for_timer = send_input_instructions.clone();
+                    stdin_ansi_parser::schedule_clipboard_forward_timeout(
+                        runtime.handle(),
+                        parser_for_timer,
+                        token,
+                        std::time::Duration::from_millis(
+                            stdin_ansi_parser::CLIENT_CLIPBOARD_FORWARD_TIMEOUT_MS,
+                        ),
+                        move |token, reply_bytes| {
+                            let _ = sender_for_timer.send(
+                                InputInstruction::ForwardedReplyFromHostComplete {
+                                    token,
+                                    reply_bytes,
+                                },
+                            );
+                        },
+                    );
+                    let mut out = os_input.get_stdout_writer();
+                    let _ = out.write_all(&query_bytes);
+                    let _ = out.flush();
                 }
-                let runtime = stdin_ansi_parser::forward_timeout_runtime();
-                let parser_for_timer = stdin_ansi_parser.clone();
-                let sender_for_timer = send_input_instructions.clone();
-                stdin_ansi_parser::schedule_clipboard_forward_timeout(
-                    runtime.handle(),
-                    parser_for_timer,
-                    token,
-                    std::time::Duration::from_millis(
-                        stdin_ansi_parser::CLIENT_CLIPBOARD_FORWARD_TIMEOUT_MS,
-                    ),
-                    move |token, reply_bytes| {
-                        let _ = sender_for_timer.send(
-                            InputInstruction::ForwardedReplyFromHostComplete { token, reply_bytes },
-                        );
-                    },
-                );
-                let mut out = os_input.get_stdout_writer();
-                let _ = out.write_all(&query_bytes);
-                let _ = out.flush();
             },
             ClientInstruction::ForwardQueryToHost {
                 token, query_bytes, ..
@@ -1759,6 +1770,64 @@ pub fn start_server_detached(
 
     os_input.connect_to_server(&*ipc_pipe);
     os_input.send_to_server(first_msg);
+}
+
+fn host_clipboard_paste_request_selection(query_bytes: &[u8]) -> Option<char> {
+    let selection = query_bytes.strip_prefix(HOST_CLIPBOARD_PASTE_REQUEST_PREFIX)?;
+    match selection {
+        [b'c'] => Some('c'),
+        [b'p'] => Some('p'),
+        _ => None,
+    }
+}
+
+fn read_host_clipboard(selection: char) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = selection;
+        command_stdout("pbpaste", &[]).or_else(|| command_stdout("/usr/bin/pbpaste", &[]))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        read_unix_clipboard(selection)
+    }
+    #[cfg(not(any(unix, target_os = "macos")))]
+    {
+        let _ = selection;
+        None
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_unix_clipboard(selection: char) -> Option<Vec<u8>> {
+    let wayland_args = match selection {
+        'p' => &["--primary", "--no-newline"][..],
+        _ => &["--no-newline"][..],
+    };
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(bytes) = command_stdout("wl-paste", wayland_args) {
+            return Some(bytes);
+        }
+    }
+
+    let xclip_selection = match selection {
+        'p' => "primary",
+        _ => "clipboard",
+    };
+    if let Some(bytes) = command_stdout("xclip", &["-selection", xclip_selection, "-out"]) {
+        return Some(bytes);
+    }
+
+    let xsel_selection = match selection {
+        'p' => "--primary",
+        _ => "--clipboard",
+    };
+    command_stdout("xsel", &[xsel_selection, "--output"])
+}
+
+fn command_stdout(command: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new(command).args(args).output().ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 fn terminal_teardown_message(message: &str, rows: usize, include_kitty_exit: bool) -> String {

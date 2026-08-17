@@ -30,6 +30,9 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::engine::Engine as _;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -39,6 +42,7 @@ use std::time::{Duration, Instant};
 use crate::route::NotificationEnd;
 
 use log::{debug, warn};
+use zellij_utils::consts::HOST_CLIPBOARD_PASTE_REQUEST_PREFIX;
 use zellij_utils::data::{
     CommandOrPlugin, Direction, EventType, FloatingPaneCoordinates, GetFocusedPaneInfoResponse,
     HostTerminalThemeMode, KeyWithModifier, LayoutInfo, LayoutWithError, ListPanesResponse,
@@ -467,6 +471,8 @@ pub enum ScreenInstruction {
     CloseFocusedPane(ClientId, Option<NotificationEnd>),
     ToggleActiveTerminalFullscreen(ClientId, Option<NotificationEnd>),
     ToggleActiveTerminalNoUiFullscreen(ClientId, Option<NotificationEnd>),
+    AcmeMaximizePane(ClientId, Option<NotificationEnd>),
+    EqualizeAcmeColumns(ClientId, Option<NotificationEnd>),
     TogglePaneFrames(Option<NotificationEnd>),
     SetPaneFrameStyle(PaneFrameStyle, Option<NotificationEnd>),
     SetSelectable(PaneId, bool),
@@ -834,6 +840,7 @@ pub enum ScreenInstruction {
     EditScrollbackForPaneWithId(PaneId, Option<NotificationEnd>),
     WriteToPaneId(Vec<u8>, PaneId, Option<NotificationEnd>),
     Paste(Vec<u8>, Option<PaneId>, ClientId, Option<NotificationEnd>),
+    PasteFromHostClipboard(PaneId),
     SetPaneColor(
         PaneId,
         Option<String>,
@@ -1068,6 +1075,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ToggleActiveTerminalNoUiFullscreen(..) => {
                 ScreenContext::ToggleActiveTerminalNoUiFullscreen
             },
+            ScreenInstruction::AcmeMaximizePane(..) => ScreenContext::AcmeMaximizePane,
+            ScreenInstruction::EqualizeAcmeColumns(..) => ScreenContext::EqualizeAcmeColumns,
             ScreenInstruction::TogglePaneFrames(..) => ScreenContext::TogglePaneFrames,
             ScreenInstruction::SetPaneFrameStyle(..) => ScreenContext::SetPaneFrameStyle,
             ScreenInstruction::SetSelectable(..) => ScreenContext::SetSelectable,
@@ -1220,6 +1229,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             },
             ScreenInstruction::WriteToPaneId(..) => ScreenContext::WriteToPaneId,
             ScreenInstruction::Paste(..) => ScreenContext::Paste,
+            ScreenInstruction::PasteFromHostClipboard(..) => ScreenContext::Paste,
             ScreenInstruction::SetPaneColor(..) => ScreenContext::SetPaneColor,
             ScreenInstruction::WriteKeyToPaneId(..) => ScreenContext::WriteKeyToPaneId,
             ScreenInstruction::CopyTextToClipboard(..) => ScreenContext::CopyTextToClipboard,
@@ -1601,8 +1611,8 @@ pub(crate) struct Screen {
     pending_forwarded_queries: HashMap<u32, PendingForwardEntry>,
     forward_queue: VecDeque<PendingForward>,
     forward_in_flight_token: Option<u32>,
-    pending_clipboard_forwards: HashMap<u32, PendingForwardEntry>,
-    clipboard_forward_queue: VecDeque<PendingForward>,
+    pending_clipboard_forwards: HashMap<u32, PendingClipboardForwardEntry>,
+    clipboard_forward_queue: VecDeque<PendingClipboardForward>,
     clipboard_forward_in_flight_token: Option<u32>,
     paste_buffer_read_enabled: bool,
     nested_guest_tracker: NestedGuestTracker,
@@ -1657,6 +1667,71 @@ struct PendingForward {
 struct PendingForwardEntry {
     pane_id: PaneId,
     query: crate::host_query::HostQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardForwardTarget {
+    ReplyToPane,
+    PasteIntoPane,
+}
+
+#[derive(Debug, Clone)]
+struct PendingClipboardForward {
+    token: u32,
+    pane_id: PaneId,
+    query: crate::host_query::HostQuery,
+    target: ClipboardForwardTarget,
+}
+
+#[derive(Debug, Clone)]
+struct PendingClipboardForwardEntry {
+    pane_id: PaneId,
+    query: crate::host_query::HostQuery,
+    target: ClipboardForwardTarget,
+}
+
+fn host_paste_selection() -> char {
+    #[cfg(target_os = "macos")]
+    {
+        'c'
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        'p'
+    }
+}
+
+fn host_clipboard_paste_request_bytes(selection: char) -> Vec<u8> {
+    let mut bytes = HOST_CLIPBOARD_PASTE_REQUEST_PREFIX.to_vec();
+    let mut selection_bytes = [0; 4];
+    bytes.extend_from_slice(selection.encode_utf8(&mut selection_bytes).as_bytes());
+    bytes
+}
+
+fn paste_bytes_from_clipboard_reply(reply_bytes: &[u8]) -> Option<Vec<u8>> {
+    if !reply_bytes.starts_with(b"\x1b]") {
+        return (!reply_bytes.is_empty()).then(|| reply_bytes.to_vec());
+    }
+    let payload = osc52_payload(reply_bytes)?;
+    let mut params = payload.splitn(3, |byte| *byte == b';');
+    if params.next()? != b"52" {
+        return None;
+    }
+    let _selection = params.next()?;
+    let encoded = params.next()?;
+    if encoded.is_empty() || encoded == b"?" {
+        return None;
+    }
+    BASE64_STANDARD.decode(encoded).ok()
+}
+
+fn osc52_payload(reply_bytes: &[u8]) -> Option<&[u8]> {
+    let payload = reply_bytes.strip_prefix(b"\x1b]")?;
+    if let Some(payload) = payload.strip_suffix(b"\x07") {
+        Some(payload)
+    } else {
+        payload.strip_suffix(b"\x1b\\")
+    }
 }
 
 /// Reserved sentinel token for Zellij's own startup batch of host
@@ -2820,7 +2895,11 @@ impl Screen {
                 let _ = self.resume_pane_after_forward(pane_id, Vec::new());
                 return STARTUP_SENTINEL_TOKEN;
             }
-            return self.enqueue_clipboard_forward(pane_id, query);
+            return self.enqueue_clipboard_forward(
+                pane_id,
+                query,
+                ClipboardForwardTarget::ReplyToPane,
+            );
         }
         let token = self.next_forward_token;
         // Skip over the reserved sentinel (0) on wrap; allocate a fresh
@@ -2841,37 +2920,61 @@ impl Screen {
         token
     }
 
+    /// Read the host paste buffer for an explicit user paste gesture and paste it into `pane_id`.
+    pub fn paste_from_host_clipboard(&mut self, pane_id: PaneId) -> u32 {
+        let query = crate::host_query::HostQuery::ClipboardContent {
+            selection: host_paste_selection(),
+            terminator: crate::host_query::OscTerminator::Bel,
+        };
+        self.enqueue_clipboard_forward(pane_id, query, ClipboardForwardTarget::PasteIntoPane)
+    }
+
     fn enqueue_clipboard_forward(
         &mut self,
         pane_id: PaneId,
         query: crate::host_query::HostQuery,
+        target: ClipboardForwardTarget,
     ) -> u32 {
         let token = self.next_forward_token;
         self.next_forward_token = self.next_forward_token.wrapping_add(1);
         if self.next_forward_token == STARTUP_SENTINEL_TOKEN {
             self.next_forward_token = 1;
         }
+        let pending_forward = PendingClipboardForward {
+            token,
+            pane_id,
+            query,
+            target,
+        };
         if self.clipboard_forward_in_flight_token.is_some() {
-            self.clipboard_forward_queue.push_back(PendingForward {
-                token,
-                pane_id,
-                query,
-            });
+            self.clipboard_forward_queue.push_back(pending_forward);
         } else {
-            self.dispatch_clipboard_forward(token, pane_id, query);
+            self.dispatch_clipboard_forward(pending_forward);
         }
         token
     }
 
-    fn dispatch_clipboard_forward(
-        &mut self,
-        token: u32,
-        pane_id: PaneId,
-        query: crate::host_query::HostQuery,
-    ) {
-        let query_bytes = query.to_query_bytes();
-        self.pending_clipboard_forwards
-            .insert(token, PendingForwardEntry { pane_id, query });
+    fn dispatch_clipboard_forward(&mut self, pending_forward: PendingClipboardForward) {
+        let PendingClipboardForward {
+            token,
+            pane_id,
+            query,
+            target,
+        } = pending_forward;
+        let query_bytes = match target {
+            ClipboardForwardTarget::ReplyToPane => query.to_query_bytes(),
+            ClipboardForwardTarget::PasteIntoPane => {
+                host_clipboard_paste_request_bytes(host_paste_selection())
+            },
+        };
+        self.pending_clipboard_forwards.insert(
+            token,
+            PendingClipboardForwardEntry {
+                pane_id,
+                query,
+                target,
+            },
+        );
         self.clipboard_forward_in_flight_token = Some(token);
         let _ = self
             .bus
@@ -2895,23 +2998,44 @@ impl Screen {
     }
 
     fn handle_clipboard_reply(&mut self, token: u32, reply_bytes: Vec<u8>) -> Result<()> {
-        if let Some(PendingForwardEntry { pane_id, query }) =
-            self.pending_clipboard_forwards.remove(&token)
+        if let Some(PendingClipboardForwardEntry {
+            pane_id,
+            query,
+            target,
+        }) = self.pending_clipboard_forwards.remove(&token)
         {
-            let payload = if reply_bytes.is_empty() {
-                query.empty_reply_bytes()
-            } else {
-                reply_bytes
-            };
-            self.resume_pane_after_forward(pane_id, payload)?;
+            match target {
+                ClipboardForwardTarget::ReplyToPane => {
+                    let payload = if reply_bytes.is_empty() {
+                        query.empty_reply_bytes()
+                    } else {
+                        reply_bytes
+                    };
+                    self.resume_pane_after_forward(pane_id, payload)?;
+                },
+                ClipboardForwardTarget::PasteIntoPane => {
+                    if let Some(bytes) = paste_bytes_from_clipboard_reply(&reply_bytes) {
+                        self.paste_to_pane_id(pane_id, bytes)?;
+                    }
+                },
+            }
         }
         self.clipboard_forward_in_flight_token = None;
         while let Some(next) = self.clipboard_forward_queue.pop_front() {
             if !self.pane_exists(&next.pane_id) {
                 continue;
             }
-            self.dispatch_clipboard_forward(next.token, next.pane_id, next.query);
+            self.dispatch_clipboard_forward(next);
             break;
+        }
+        Ok(())
+    }
+
+    fn paste_to_pane_id(&mut self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
+        for tab in self.get_tabs_mut().values_mut() {
+            if tab.has_pane_with_pid(&pane_id) {
+                return tab.paste_to_pane_id(bytes, pane_id, None);
+            }
         }
         Ok(())
     }
@@ -7303,6 +7427,15 @@ impl Screen {
                     if !is_bare_motion {
                         let _ = self.log_and_report_session_state();
                     }
+                    if mouse_effect.kill_session_if_no_selectable_panes
+                        && active_pane_id_before.is_some()
+                        && !self.tabs.values().any(|tab| tab.has_selectable_panes())
+                    {
+                        let _ = self
+                            .bus
+                            .senders
+                            .send_to_server(ServerInstruction::KillSession);
+                    }
                     let active_pane_id_after = self
                         .get_active_tab(client_id)
                         .ok()
@@ -8342,7 +8475,8 @@ pub(crate) fn screen_thread_main(
                             } | NewPanePlacement::Stacked {
                                 pane_id_to_stack_under: None,
                                 ..
-                            }
+                            } | NewPanePlacement::AcmeColumn
+                                | NewPanePlacement::AcmePane
                         );
                         let client_id = if needs_client_id {
                             screen
@@ -9689,6 +9823,32 @@ pub(crate) fn screen_thread_main(
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
                         .toggle_active_pane_no_ui_fullscreen(client_id)
+                );
+                screen.render(None)?;
+                screen.log_and_report_session_state()?;
+            },
+            ScreenInstruction::AcmeMaximizePane(
+                client_id,
+                _completion_tx, // the action ends here, dropping this will release anything
+                                // waiting for it
+            ) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| tab.acme_maximize_pane(client_id)
+                );
+                screen.render(None)?;
+                screen.log_and_report_session_state()?;
+            },
+            ScreenInstruction::EqualizeAcmeColumns(
+                client_id,
+                _completion_tx, // the action ends here, dropping this will release anything
+                                // waiting for it
+            ) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| tab.equalize_acme_columns(client_id)
                 );
                 screen.render(None)?;
                 screen.log_and_report_session_state()?;
@@ -11683,6 +11843,10 @@ pub(crate) fn screen_thread_main(
                         );
                     },
                 }
+                screen.render(None)?;
+            },
+            ScreenInstruction::PasteFromHostClipboard(pane_id) => {
+                screen.paste_from_host_clipboard(pane_id);
                 screen.render(None)?;
             },
             ScreenInstruction::SetPaneColor(pane_id, fg, bg, _completion) => {

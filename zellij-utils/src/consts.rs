@@ -24,6 +24,7 @@ pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
 pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/themes");
 
 pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 1;
+pub const HOST_CLIPBOARD_PASTE_REQUEST_PREFIX: &[u8] = b"zellij-host-clipboard-paste:";
 
 pub fn session_info_cache_file_name(session_name: &str) -> PathBuf {
     session_info_folder_for_session(session_name).join("session-metadata.kdl")
