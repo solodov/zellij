@@ -310,8 +310,7 @@ fn position_is_on_vertical_frame(pane: &dyn Pane, position: &Position) -> bool {
         return false;
     }
     let left_frame = pane.x()..pane.get_content_x();
-    let right_frame =
-        pane.get_content_x() + pane.get_content_columns()..pane.x() + pane.cols();
+    let right_frame = pane.get_content_x() + pane.get_content_columns()..pane.x() + pane.cols();
     left_frame.contains(&position.column()) || right_frame.contains(&position.column())
 }
 

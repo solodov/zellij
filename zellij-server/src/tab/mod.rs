@@ -38,7 +38,8 @@ use crate::ui::hint_text::{
     held_hint_variants, hover_hint_variants, resize_hint_variants, HintExitStatus,
 };
 use crate::ui::{
-    loading_indication::LoadingIndication, pane_boundaries_frame::FrameParams,
+    loading_indication::LoadingIndication,
+    pane_boundaries_frame::FrameParams,
     pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
 };
 use layout_applier::LayoutApplier;
@@ -156,6 +157,41 @@ macro_rules! resize_pty {
 pub const MIN_TERMINAL_HEIGHT: usize = 5;
 pub const MIN_TERMINAL_WIDTH: usize = 5;
 
+pub(crate) const ACME_TAB_BAR_ROWS: usize = 1;
+
+pub(crate) fn native_acme_tab_bar_enabled(pane_frame_style: PaneFrameStyle) -> bool {
+    pane_frame_style.draws_titles()
+}
+
+pub(crate) fn native_acme_viewport_for_display_area(
+    display_area: Size,
+    pane_frame_style: PaneFrameStyle,
+) -> Viewport {
+    if native_acme_tab_bar_enabled(pane_frame_style) && display_area.rows > 0 {
+        Viewport {
+            y: ACME_TAB_BAR_ROWS,
+            rows: display_area.rows.saturating_sub(ACME_TAB_BAR_ROWS),
+            cols: display_area.cols,
+            ..Default::default()
+        }
+    } else {
+        display_area.into()
+    }
+}
+
+pub(crate) fn native_acme_tiled_area_for_display_area(
+    display_area: Size,
+    pane_frame_style: PaneFrameStyle,
+) -> PaneGeom {
+    let viewport = native_acme_viewport_for_display_area(display_area, pane_frame_style);
+    let mut free_space = PaneGeom::default();
+    free_space.x = viewport.x;
+    free_space.y = viewport.y;
+    free_space.cols.set_inner(viewport.cols);
+    free_space.rows.set_inner(viewport.rows);
+    free_space
+}
+
 const MAX_PENDING_VTE_EVENTS: usize = 7000;
 
 type HoldForCommand = Option<RunCommand>;
@@ -192,7 +228,6 @@ pub(crate) struct Tab {
     pub position: usize,
     pub name: String,
     pub prev_name: String,
-    default_name: String,
     pub size: Size,
     tiled_panes: TiledPanes,
     floating_panes: FloatingPanes,
@@ -735,9 +770,6 @@ pub trait Pane {
         self.current_title()
     }
     fn custom_title(&self) -> Option<String>;
-    fn has_explicit_title(&self) -> bool {
-        false
-    }
     fn scroll_position(&self) -> (usize, usize) {
         (0, 0)
     }
@@ -900,13 +932,8 @@ impl Tab {
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
-        let default_name = if name.is_empty() {
-            format!("Tab #{}", id + 1)
-        } else {
-            String::new()
-        };
         let name = if name.is_empty() {
-            default_name.clone()
+            format!("Tab #{}", id + 1)
         } else {
             name
         };
@@ -916,7 +943,7 @@ impl Tab {
             connected_clients.insert(client_id);
         }
         let initial_size = display_area;
-        let viewport: Viewport = display_area.into();
+        let viewport = native_acme_viewport_for_display_area(display_area, pane_frame_style);
         let viewport = Rc::new(RefCell::new(viewport));
         let display_area = Rc::new(RefCell::new(display_area));
         let connected_clients = Rc::new(RefCell::new(connected_clients));
@@ -979,7 +1006,6 @@ impl Tab {
             stack_list_session_is_mirrored: session_is_mirrored,
             name: name.clone(),
             prev_name: name,
-            default_name,
             size: initial_size,
             max_panes,
             viewport,
@@ -2170,27 +2196,6 @@ impl Tab {
     pub fn single_pane_titles(&self) -> bool {
         self.pane_frame_style.draws_titles()
             && self.get_selectable_tiled_content_panes().count() == 1
-    }
-    fn tab_name_is_default(&self) -> bool {
-        !self.name.is_empty() && self.name == self.default_name
-    }
-    pub fn single_pane_tab_name(&self) -> Option<String> {
-        if !self.single_pane_titles() {
-            return None;
-        }
-        let (_, pane) = self.get_selectable_tiled_content_panes().next()?;
-        let mut base = if self.tab_name_is_default() && pane.has_explicit_title() {
-            pane.current_title()
-        } else {
-            self.name.clone()
-        };
-        if pane.is_held() && pane.exited() {
-            match pane.exit_status() {
-                Some(exit_code) => base.push_str(&format!(" [ EXIT CODE: {} ] ", exit_code)),
-                None => base.push_str(" [ EXITED ] "),
-            }
-        }
-        Some(base)
     }
     fn resolve_active_pane_scroll(&self, _client_id: ClientId) -> Option<(usize, usize)> {
         if !self.single_pane_titles() {
@@ -4845,22 +4850,20 @@ impl Tab {
             .floating_panes
             .get(&active_pane_id)
             .or_else(|| self.tiled_panes.get_pane(active_pane_id))?;
-        active_terminal.cursor_coordinates(Some(client_id)).and_then(
-            |(x_in_terminal, y_in_terminal, is_visible)| {
+        active_terminal
+            .cursor_coordinates(Some(client_id))
+            .and_then(|(x_in_terminal, y_in_terminal, is_visible)| {
                 let x = active_terminal.x() + x_in_terminal;
                 let y = active_terminal.y() + y_in_terminal;
                 let cursor_is_on_acme_title = active_pane_is_tiled
-                    && i32::try_from(y)
-                        .ok()
-                        .zip(u16::try_from(x).ok())
-                        .and_then(|(line, column)| {
+                    && i32::try_from(y).ok().zip(u16::try_from(x).ok()).and_then(
+                        |(line, column)| {
                             self.tiled_panes
                                 .acme_title_pane_id_at_position(&Position::new(line, column))
-                        })
-                        == Some(active_pane_id);
+                        },
+                    ) == Some(active_pane_id);
                 (!cursor_is_on_acme_title).then_some((x, y, is_visible))
-            },
-        )
+            })
     }
     pub fn toggle_active_pane_fullscreen(&mut self, client_id: ClientId) {
         if self.floating_panes.fullscreen_is_active()
@@ -5005,7 +5008,10 @@ impl Tab {
         let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
             return;
         };
-        match self.tiled_panes.acme_toggle_title_button_pane(active_pane_id) {
+        match self
+            .tiled_panes
+            .acme_toggle_title_button_pane(active_pane_id)
+        {
             Ok(()) => {
                 self.set_should_clear_display_before_rendering();
                 self.swap_layouts.set_is_tiled_damaged();
@@ -7126,7 +7132,15 @@ impl Tab {
     }
 
     pub fn set_pane_frames(&mut self, pane_frame_style: PaneFrameStyle) {
+        let tab_bar_reservation_changed = native_acme_tab_bar_enabled(self.pane_frame_style)
+            != native_acme_tab_bar_enabled(pane_frame_style);
         self.tiled_panes.set_pane_frames(pane_frame_style);
+        if tab_bar_reservation_changed {
+            let display_area = *self.display_area.borrow();
+            *self.viewport.borrow_mut() =
+                native_acme_viewport_for_display_area(display_area, pane_frame_style);
+            self.tiled_panes.resize(display_area);
+        }
         self.floating_panes.set_pane_frame_style(pane_frame_style);
         self.pane_frame_style = pane_frame_style;
         self.set_should_clear_display_before_rendering();

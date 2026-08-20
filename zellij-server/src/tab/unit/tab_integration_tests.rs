@@ -16561,7 +16561,11 @@ fn new_acme_pane_equalizes_expanded_rows_and_preserves_collapsed_rows() {
     let client_id = 1;
     let mut tab = create_new_tab(size, ModeInfo::default());
 
-    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
         tab.new_pane(
             pane_id,
             None,
@@ -16803,7 +16807,11 @@ fn closing_acme_pane_above_collapsed_pane_preserves_collapsed_rows() {
     let client_id = 1;
     let mut tab = create_new_tab(size, ModeInfo::default());
 
-    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
         tab.new_pane(
             pane_id,
             None,
@@ -16918,7 +16926,11 @@ fn dragging_inner_collapsed_acme_title_down_expands_pane_above_it() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     tab.set_pane_frames(PaneFrameStyle::Titles);
 
-    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
         tab.new_pane(
             pane_id,
             None,
@@ -16971,7 +16983,11 @@ fn dragging_inner_collapsed_acme_title_back_to_start_restores_initial_rows() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     tab.set_pane_frames(PaneFrameStyle::Titles);
 
-    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
         tab.new_pane(
             pane_id,
             None,
@@ -16997,10 +17013,16 @@ fn dragging_inner_collapsed_acme_title_back_to_start_restores_initial_rows() {
         client_id,
     )
     .unwrap();
-    tab.handle_mouse_event(&MouseEvent::new_left_motion_event(title_position), client_id)
-        .unwrap();
-    tab.handle_mouse_event(&MouseEvent::new_left_release_event(title_position), client_id)
-        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(title_position),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(title_position),
+        client_id,
+    )
+    .unwrap();
 
     assert_eq!(pane_geometries(&tab), before);
 }
@@ -17015,7 +17037,11 @@ fn dragging_inner_collapsed_acme_title_up_expands_that_pane() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     tab.set_pane_frames(PaneFrameStyle::Titles);
 
-    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Terminal(4)] {
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Terminal(4),
+    ] {
         tab.new_pane(
             pane_id,
             None,

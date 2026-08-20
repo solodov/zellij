@@ -1,7 +1,10 @@
 use zellij_utils::errors::prelude::*;
 
 use crate::resize_pty;
-use crate::tab::{get_next_terminal_position, HoldForCommand, Pane};
+use crate::tab::{
+    get_next_terminal_position, native_acme_tiled_area_for_display_area,
+    native_acme_viewport_for_display_area, HoldForCommand, Pane,
+};
 
 use crate::{
     os_input_output::ServerOsApi,
@@ -1048,7 +1051,8 @@ impl<'a> LayoutApplier<'a> {
         {
             // reset viewport before reapplying offset
             let mut viewport = viewport.borrow_mut();
-            *viewport = (*display_area.borrow()).into();
+            *viewport =
+                native_acme_viewport_for_display_area(*display_area.borrow(), pane_frame_style);
         }
         let boundary_geoms = tiled_panes.non_selectable_pane_geoms_inside_viewport();
         {
@@ -1122,17 +1126,7 @@ impl<'a> LayoutApplier<'a> {
         }
     }
     fn total_space_for_tiled_panes(&self) -> PaneGeom {
-        // for tiled panes we need to take the display area rather than the viewport because the
-        // viewport can potentially also be changed
-        let (display_area_cols, display_area_rows) = {
-            let display_area = self.display_area.borrow();
-            (display_area.cols, display_area.rows)
-        };
-
-        let mut free_space = PaneGeom::default();
-        free_space.cols.set_inner(display_area_cols);
-        free_space.rows.set_inner(display_area_rows);
-        free_space
+        native_acme_tiled_area_for_display_area(*self.display_area.borrow(), self.pane_frame_style)
     }
 }
 

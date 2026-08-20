@@ -1,4 +1,7 @@
-use super::{screen_thread_main, CopyOptions, Screen, ScreenInstruction};
+use super::{
+    screen_thread_main, AcmeTabBarHitTarget, AcmeTabBarSegment, CopyOptions, Screen,
+    ScreenInstruction,
+};
 use crate::panes::kitty_graphics::KittyImageStore;
 use crate::panes::PaneId;
 use crate::{
@@ -913,6 +916,64 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
             None,
         )
         .expect("TEST");
+}
+
+#[test]
+fn acme_tab_bar_segment_hit_target_treats_square_padding_as_square() {
+    let segment = AcmeTabBarSegment {
+        square_hit_start: 0,
+        square_hit_end: 3,
+        name_start: 3,
+        name_end: 7,
+        tab_id: 7,
+        position: 2,
+        name: "tab1".to_owned(),
+        active: false,
+    };
+
+    for column in 0..3 {
+        assert_eq!(
+            segment.hit_target_at(column),
+            Some(AcmeTabBarHitTarget::TabSquare {
+                tab_id: 7,
+                position: 2,
+            })
+        );
+    }
+    for column in 3..7 {
+        assert_eq!(
+            segment.hit_target_at(column),
+            Some(AcmeTabBarHitTarget::Tab {
+                tab_id: 7,
+                position: 2,
+            })
+        );
+    }
+    for column in [7, 8, 9] {
+        assert_eq!(segment.hit_target_at(column), None);
+    }
+}
+
+#[test]
+fn acme_tab_bar_segments_use_static_tab_names() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_new_screen(size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
+    new_tab(&mut screen, 1, 0);
+
+    let tab_id = *screen.active_tab_ids.get(&client_id).unwrap();
+    let tab_name = screen.tabs.get(&tab_id).unwrap().name.clone();
+    screen
+        .get_active_tab_mut(client_id)
+        .unwrap()
+        .handle_pty_bytes(1, b"\x1b]0;shell-title\x07".to_vec())
+        .unwrap();
+
+    let segments = screen.acme_tab_bar_segments(size.cols, Some(tab_id));
+    assert_eq!(segments[0].name, tab_name);
+    let tab_state = screen.generate_and_report_tab_state().unwrap();
+    assert_eq!(tab_state[0].name, tab_name);
 }
 
 #[test]

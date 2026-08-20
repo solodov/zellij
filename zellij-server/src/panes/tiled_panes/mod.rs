@@ -22,8 +22,8 @@ use acme::{
     acme_own_line_title_pane_ids, acme_pane_is_maximized, acme_panes_before_own_line_title,
     acme_previous_line_title_pane_ids, acme_rows_dimension, acme_title_pane_ids,
     equalized_acme_row_heights, equalized_lengths, percent_dimension, resize_acme_column_pane,
-    AcmeColumn, AcmePaneGeometry, AcmePaneRowsSnapshot,
-    ACME_BOUNDARY_COLOR, ACME_COLLAPSED_PANE_ROWS, ACME_TITLE_BUTTON_COLUMN_OFFSET,
+    AcmeColumn, AcmePaneGeometry, AcmePaneRowsSnapshot, ACME_BOUNDARY_COLOR,
+    ACME_COLLAPSED_PANE_ROWS, ACME_TITLE_BUTTON_COLUMN_OFFSET,
 };
 use tiled_pane_grid::{split, TiledPaneGrid, RESIZE_PERCENT};
 
@@ -33,7 +33,11 @@ use crate::{
     output::Output,
     panes::{ActivePanes, PaneId},
     plugins::PluginInstruction,
-    tab::{pane_info_for_pane, Pane, PaneEdge, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH},
+    tab::{
+        native_acme_tab_bar_enabled, native_acme_tiled_area_for_display_area,
+        native_acme_viewport_for_display_area, pane_info_for_pane, Pane, PaneEdge,
+        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+    },
     thread_bus::ThreadSenders,
     ui::boundaries::Boundaries,
     ui::pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
@@ -77,7 +81,6 @@ fn pane_content_offset(position_and_size: &PaneGeom, viewport: &Viewport) -> (us
     };
     (columns_offset, rows_offset)
 }
-
 
 pub struct TiledPanes {
     pub panes: BTreeMap<PaneId, Box<dyn Pane>>,
@@ -161,6 +164,9 @@ impl TiledPanes {
         self.set_force_render();
     }
     pub fn add_pane_with_existing_geom(&mut self, pane_id: PaneId, mut pane: Box<dyn Pane>) {
+        if self.panes.is_empty() {
+            self.fit_pane_to_native_acme_viewport_if_needed(pane.as_mut());
+        }
         if self.pane_frame_style.draws_full_frames() {
             pane.set_content_offset(Offset::frame(1));
         }
@@ -316,11 +322,12 @@ impl TiledPanes {
     fn add_pane(
         &mut self,
         pane_id: PaneId,
-        pane: Box<dyn Pane>,
+        mut pane: Box<dyn Pane>,
         should_relayout: bool,
         client_id: Option<ClientId>,
     ) {
         if self.panes.is_empty() {
+            self.fit_pane_to_native_acme_viewport_if_needed(pane.as_mut());
             self.panes.insert(pane_id, pane);
             return;
         }
@@ -600,24 +607,24 @@ impl TiledPanes {
         Ok(())
     }
     pub fn relayout(&mut self, direction: SplitDirection) {
+        let display_area = *self.display_area.borrow();
+        let tiled_area =
+            native_acme_tiled_area_for_display_area(display_area, self.pane_frame_style);
         let mut pane_grid = TiledPaneGrid::new(
             &mut self.panes,
             &self.panes_to_hide,
-            *self.display_area.borrow(),
+            display_area,
             *self.viewport.borrow(),
         );
         match direction {
-            SplitDirection::Horizontal => {
-                pane_grid.layout(direction, (*self.display_area.borrow()).cols)
-            },
-            SplitDirection::Vertical => {
-                pane_grid.layout(direction, (*self.display_area.borrow()).rows)
-            },
+            SplitDirection::Horizontal => pane_grid.layout(direction, tiled_area.cols.as_usize()),
+            SplitDirection::Vertical => pane_grid.layout(direction, tiled_area.rows.as_usize()),
         }
         .or_else(|e| Err(anyError::msg(e)))
         .with_context(|| format!("{:?} relayout of tab failed", direction))
         .non_fatal();
 
+        self.align_panes_to_native_acme_viewport_if_needed();
         self.set_pane_frames(self.pane_frame_style);
     }
     pub fn reapply_pane_frames(&mut self) {
@@ -633,7 +640,8 @@ impl TiledPanes {
             .values()
             .filter(|p| p.selectable() && !p.borderless())
             .count()
-            == 1;
+            == 1
+            && !native_acme_tab_bar_enabled(pane_frame_style);
         let acme_columns = draws_titles.then(|| self.acme_columns().ok()).flatten();
         let acme_layout_uses_tag_titles = acme_columns.is_some();
         let acme_own_line_title_pane_ids = acme_columns
@@ -744,6 +752,56 @@ impl TiledPanes {
         }
         self.reset_boundaries();
     }
+    fn fit_pane_to_native_acme_viewport_if_needed(&self, pane: &mut dyn Pane) {
+        if !native_acme_tab_bar_enabled(self.pane_frame_style) {
+            return;
+        }
+        let viewport = *self.viewport.borrow();
+        let current_geom = pane.position_and_size();
+        if pane_geom_is_inside_viewport(&viewport, &current_geom) {
+            return;
+        }
+        let mut native_acme_geom = native_acme_tiled_area_for_display_area(
+            *self.display_area.borrow(),
+            self.pane_frame_style,
+        );
+        native_acme_geom.logical_position = current_geom.logical_position;
+        pane.set_geom(native_acme_geom);
+    }
+
+    fn align_panes_to_native_acme_viewport_if_needed(&mut self) {
+        // The native Acme tab bar is virtual UI, not a real borderless plugin pane.
+        // Some generic tiled layout paths normalize panes to y=0, so shift them
+        // back into the reserved viewport before applying title/content offsets.
+        if !native_acme_tab_bar_enabled(self.pane_frame_style) {
+            return;
+        }
+        let viewport = *self.viewport.borrow();
+        let Some(topmost_pane_y) = self
+            .panes
+            .iter()
+            .filter(|(pane_id, _)| !self.panes_to_hide.contains(pane_id))
+            .map(|(_, pane)| pane.current_geom().y)
+            .min()
+        else {
+            return;
+        };
+        if topmost_pane_y >= viewport.y {
+            return;
+        }
+        let y_offset = viewport.y - topmost_pane_y;
+        for pane in self.panes.values_mut() {
+            if let Some(mut geom_override) = pane.geom_override() {
+                geom_override.y += y_offset;
+                pane.set_geom_override(geom_override);
+            } else {
+                let mut geom = pane.position_and_size();
+                geom.y += y_offset;
+                pane.set_geom(geom);
+            }
+        }
+    }
+
     pub fn can_split_pane_horizontally(&mut self, client_id: ClientId) -> bool {
         match self.active_panes.get(&client_id).copied() {
             Some(active_pane_id) => self.can_split_pane_id_horizontally(active_pane_id),
@@ -1101,7 +1159,8 @@ impl TiledPanes {
             .map(|snapshot| snapshot.matches_column(column))
             .unwrap_or(false)
         {
-            self.acme_rows_before_maximize = Some(AcmePaneRowsSnapshot::new(column, target_pane_id));
+            self.acme_rows_before_maximize =
+                Some(AcmePaneRowsSnapshot::new(column, target_pane_id));
         }
         self.apply_acme_geometries(planned_geometries)?;
         self.reapply_pane_frames();
@@ -1582,7 +1641,9 @@ impl TiledPanes {
             .iter()
             .filter(|(_, p)| p.selectable() && !p.borderless())
             .count();
-        let omit_pane_title = self.pane_frame_style.draws_titles() && content_pane_count == 1;
+        let omit_pane_title = self.pane_frame_style.draws_titles()
+            && content_pane_count == 1
+            && !native_acme_tab_bar_enabled(self.pane_frame_style);
         for (kind, pane) in self.panes.iter_mut() {
             match kind {
                 PaneId::Terminal(_) => {
@@ -1716,17 +1777,15 @@ impl TiledPanes {
                     } else if (self.pane_frame_style.draws_titles() || pane_is_stacked)
                         && reserved_rows_for_pane == 0
                     {
-                        if !pane_has_acme_title {
-                            pane_contents_and_ui
-                                .render_pane_frame(
-                                    *client_id,
-                                    client_mode,
-                                    self.session_is_mirrored,
-                                    is_floating,
-                                    pane_is_selectable,
-                                )
-                                .with_context(err_context)?;
-                        }
+                        pane_contents_and_ui
+                            .render_pane_frame(
+                                *client_id,
+                                client_mode,
+                                self.session_is_mirrored,
+                                is_floating,
+                                pane_is_selectable,
+                            )
+                            .with_context(err_context)?;
                         let boundaries = client_id_to_boundaries
                             .entry(*client_id)
                             .or_insert_with(|| Boundaries::new(*self.viewport.borrow()));
@@ -1862,14 +1921,11 @@ impl TiledPanes {
         }
         if !floating_panes_are_visible
             && acme_layout_uses_tag_titles
-            && self
-                .panes
-                .iter()
-                .any(|(pane_id, pane)| {
-                    acme_title_pane_ids.contains(pane_id)
-                        && !self.panes_to_hide.contains(pane_id)
-                        && pane.command_running_since().is_some()
-                })
+            && self.panes.iter().any(|(pane_id, pane)| {
+                acme_title_pane_ids.contains(pane_id)
+                    && !self.panes_to_hide.contains(pane_id)
+                    && pane.command_running_since().is_some()
+            })
         {
             let _ = self
                 .senders
@@ -1945,6 +2001,8 @@ impl TiledPanes {
             let mut display_area = self.display_area.borrow_mut();
             let mut viewport = self.viewport.borrow_mut();
             let Size { rows, cols } = new_screen_size;
+            let target_viewport =
+                native_acme_viewport_for_display_area(new_screen_size, self.pane_frame_style);
             let mut pane_grid = TiledPaneGrid::new(
                 &mut self.panes,
                 &self.panes_to_hide,
@@ -1976,7 +2034,7 @@ impl TiledPanes {
                                      viewport: &mut Viewport,
                                      rows: usize|
              -> bool {
-                match pane_grid.layout(SplitDirection::Vertical, rows) {
+                match pane_grid.layout(SplitDirection::Vertical, target_viewport.rows) {
                     Ok(_) => {
                         let row_difference = rows as isize - display_area.rows as isize;
                         viewport.rows = (viewport.rows as isize + row_difference) as usize;
@@ -2004,9 +2062,11 @@ impl TiledPanes {
                     log::error!("Failed to resize vertically, will not attempt again.");
                 }
             }
+            *viewport = target_viewport;
             display_area.rows = rows;
             display_area.cols = cols;
         }
+        self.align_panes_to_native_acme_viewport_if_needed();
         self.set_pane_frames(self.pane_frame_style);
     }
 

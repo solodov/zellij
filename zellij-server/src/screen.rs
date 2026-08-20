@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::str;
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::route::NotificationEnd;
 
@@ -84,13 +85,13 @@ use crate::pane_groups::PaneGroups;
 use crate::panes::alacritty_functions::xparse_color;
 use crate::panes::grid::{namespace_notification_id, Osc99PayloadType, PendingNotification};
 use crate::panes::nested_session_modal::GuestModalShortcuts;
-use crate::panes::terminal_character::AnsiCode;
+use crate::panes::terminal_character::{AnsiCode, RcCharacterStyles, TerminalCharacter};
 use crate::panes::terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END};
 use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
 
 use crate::{
     nested_guest::NestedGuestTracker,
-    output::{HostKittyState, Output},
+    output::{CharacterChunk, HostKittyState, Output},
     panes::kitty_graphics::{KittyHostSupport, KittyImageStore},
     panes::sixel::SixelImageStore,
     panes::LinkHandler,
@@ -112,6 +113,117 @@ use zellij_utils::{
 };
 
 use crate::mobile_web::MobileWebPrefs;
+
+const ACME_TAB_BAR_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xe4, 0xf6, 0xd3));
+const ACME_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x2a));
+const ACME_ACTIVE_TAB_BUTTON: char = '■';
+const ACME_INACTIVE_TAB_BUTTON: char = '□';
+const ACME_TAB_BAR_Z_INDEX: usize = usize::MAX;
+const ACME_TAB_BAR_LEADING_SPACES: usize = 1;
+const ACME_TAB_BUTTON_WIDTH: usize = 1;
+const ACME_TAB_BUTTON_NAME_SPACES: usize = 1;
+const ACME_TAB_TRAILING_SPACES: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcmeTabBarHitTarget {
+    TabSquare { tab_id: usize, position: usize },
+    Tab { tab_id: usize, position: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AcmeTabBarSegment {
+    square_hit_start: usize,
+    square_hit_end: usize,
+    name_start: usize,
+    name_end: usize,
+    tab_id: usize,
+    position: usize,
+    name: String,
+    active: bool,
+}
+
+impl AcmeTabBarSegment {
+    fn hit_target_at(&self, column: usize) -> Option<AcmeTabBarHitTarget> {
+        if column >= self.square_hit_start && column < self.square_hit_end {
+            Some(AcmeTabBarHitTarget::TabSquare {
+                tab_id: self.tab_id,
+                position: self.position,
+            })
+        } else if column >= self.name_start && column < self.name_end {
+            Some(AcmeTabBarHitTarget::Tab {
+                tab_id: self.tab_id,
+                position: self.position,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn acme_tab_bar_style(active: bool) -> RcCharacterStyles {
+    acme_tab_bar_style_with_background(active, ACME_TAB_BAR_BACKGROUND)
+}
+
+fn acme_tab_bar_active_rename_name_style() -> RcCharacterStyles {
+    acme_tab_bar_style_with_background(true, AnsiCode::Reset)
+}
+
+fn acme_tab_bar_style_with_background(active: bool, background: AnsiCode) -> RcCharacterStyles {
+    let mut styles = RcCharacterStyles::reset();
+    styles.update(|styles| {
+        styles.background = Some(background);
+        styles.foreground = Some(ACME_TAB_BAR_FOREGROUND);
+        styles.underline = Some(AnsiCode::Underline(None));
+        styles.bold = Some(if active {
+            AnsiCode::On
+        } else {
+            AnsiCode::Reset
+        });
+        styles.italic = Some(AnsiCode::Reset);
+    });
+    styles
+}
+
+fn push_acme_tab_bar_text(
+    row: &mut Vec<TerminalCharacter>,
+    text: &str,
+    style: &RcCharacterStyles,
+    max_width: usize,
+) {
+    for character in text.chars() {
+        if !push_acme_tab_bar_char(row, character, style, max_width) {
+            break;
+        }
+    }
+}
+
+fn push_acme_tab_bar_spaces(
+    row: &mut Vec<TerminalCharacter>,
+    count: usize,
+    style: &RcCharacterStyles,
+    max_width: usize,
+) {
+    for _ in 0..count {
+        if !push_acme_tab_bar_char(row, ' ', style, max_width) {
+            break;
+        }
+    }
+}
+
+fn push_acme_tab_bar_char(
+    row: &mut Vec<TerminalCharacter>,
+    character: char,
+    style: &RcCharacterStyles,
+    max_width: usize,
+) -> bool {
+    let used_width: usize = row.iter().map(|character| character.width()).sum();
+    let character_width = character.width().unwrap_or(0);
+    if used_width + character_width > max_width {
+        return false;
+    }
+    row.push(TerminalCharacter::new_styled(character, style.clone()));
+    true
+}
 
 /// Parses a namespaced OSC 99 response and extracts the original pane ID
 /// and un-namespaced response bytes.
@@ -1535,7 +1647,6 @@ pub(crate) struct Screen {
     max_panes: Option<usize>,
     /// A map between this [`Screen`]'s tabs and their ID/key.
     tabs: BTreeMap<usize, Tab>,
-    last_single_pane_tab_names: HashMap<usize, Option<String>>,
     pixel_dimensions: PixelDimensions,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     stacked_resize: Rc<RefCell<bool>>,
@@ -1828,7 +1939,6 @@ impl Screen {
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
-            last_single_pane_tab_names: HashMap::new(),
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
             tab_history: BTreeMap::new(),
@@ -4288,6 +4398,218 @@ impl Screen {
         Ok(())
     }
 
+    fn acme_tab_bar_enabled(&self) -> bool {
+        self.pane_frame_style.draws_titles()
+    }
+
+    fn acme_tab_bar_segments(
+        &self,
+        max_cols: usize,
+        active_tab_id: Option<usize>,
+    ) -> Vec<AcmeTabBarSegment> {
+        let mut segments = vec![];
+        let mut x = ACME_TAB_BAR_LEADING_SPACES.min(max_cols);
+        let mut tabs: Vec<&Tab> = self.tabs.values().collect();
+        tabs.sort_by_key(|tab| tab.position);
+        for tab in tabs {
+            if x >= max_cols {
+                break;
+            }
+            let width = ACME_TAB_BUTTON_WIDTH
+                + ACME_TAB_BUTTON_NAME_SPACES
+                + tab.name.width()
+                + ACME_TAB_TRAILING_SPACES;
+            let square_hit_start = x.saturating_sub(1);
+            let square_hit_end =
+                (x + ACME_TAB_BUTTON_WIDTH + ACME_TAB_BUTTON_NAME_SPACES).min(max_cols);
+            let name_start = square_hit_end;
+            let name_end = (name_start + tab.name.width()).min(max_cols);
+            segments.push(AcmeTabBarSegment {
+                square_hit_start,
+                square_hit_end,
+                name_start,
+                name_end,
+                tab_id: tab.id,
+                position: tab.position,
+                name: tab.name.clone(),
+                active: Some(tab.id) == active_tab_id,
+            });
+            x += width;
+        }
+        segments
+    }
+
+    fn acme_tab_bar_hit_target(
+        &self,
+        position: Position,
+        max_cols: usize,
+    ) -> Option<AcmeTabBarHitTarget> {
+        if !self.acme_tab_bar_enabled() || position.line() != 0 {
+            return None;
+        }
+        let column = position.column();
+        self.acme_tab_bar_segments(max_cols, None)
+            .into_iter()
+            .find_map(|segment| segment.hit_target_at(column))
+    }
+
+    fn render_acme_tab_bar(&self, output: &mut Output) -> Result<()> {
+        if !self.acme_tab_bar_enabled() {
+            return Ok(());
+        }
+        let err_context = || "failed to render Acme tab bar".to_string();
+        for client_id in self.active_tab_ids.keys().copied() {
+            if self.watcher_clients.contains_key(&client_id) {
+                continue;
+            }
+            let size = self.size_for_client(Some(client_id));
+            if size.rows == 0 || size.cols == 0 {
+                continue;
+            }
+            let active_tab_id = self.active_tab_ids.get(&client_id).copied();
+            let active_tab_is_renaming =
+                self.get_client_input_mode(client_id) == Some(InputMode::RenameTab);
+            let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, active_tab_is_renaming);
+            output
+                .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
+                .with_context(err_context)?;
+        }
+        Ok(())
+    }
+
+    fn render_acme_tab_bar_for_client(
+        &self,
+        output: &mut Output,
+        client_id: ClientId,
+    ) -> Result<()> {
+        if !self.acme_tab_bar_enabled() {
+            return Ok(());
+        }
+        let err_context = || "failed to render Acme tab bar for watcher".to_string();
+        let size = self.size_for_client(Some(client_id));
+        if size.rows == 0 || size.cols == 0 {
+            return Ok(());
+        }
+        let active_tab_id = self.active_tab_ids.get(&client_id).copied();
+        let active_tab_is_renaming =
+            self.get_client_input_mode(client_id) == Some(InputMode::RenameTab);
+        let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, active_tab_is_renaming);
+        output
+            .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
+            .with_context(err_context)
+    }
+
+    fn acme_tab_bar_chunk(
+        &self,
+        cols: usize,
+        active_tab_id: Option<usize>,
+        active_tab_is_renaming: bool,
+    ) -> CharacterChunk {
+        let normal_style = acme_tab_bar_style(false);
+        let active_style = acme_tab_bar_style(true);
+        let rename_style = acme_tab_bar_active_rename_name_style();
+        let mut row = vec![];
+        push_acme_tab_bar_spaces(&mut row, ACME_TAB_BAR_LEADING_SPACES, &normal_style, cols);
+
+        for segment in self.acme_tab_bar_segments(cols, active_tab_id) {
+            let tab_button = if segment.active {
+                ACME_ACTIVE_TAB_BUTTON
+            } else {
+                ACME_INACTIVE_TAB_BUTTON
+            };
+            let style = if segment.active {
+                &active_style
+            } else {
+                &normal_style
+            };
+            let name_style = if segment.active && active_tab_is_renaming {
+                &rename_style
+            } else {
+                style
+            };
+            push_acme_tab_bar_char(&mut row, tab_button, style, cols);
+            push_acme_tab_bar_spaces(&mut row, ACME_TAB_BUTTON_NAME_SPACES, style, cols);
+            push_acme_tab_bar_text(&mut row, &segment.name, name_style, cols);
+            push_acme_tab_bar_spaces(&mut row, ACME_TAB_TRAILING_SPACES, style, cols);
+        }
+        while row.iter().map(|character| character.width()).sum::<usize>() < cols {
+            push_acme_tab_bar_char(&mut row, ' ', &normal_style, cols);
+        }
+        CharacterChunk::new(row, 0, 0)
+    }
+
+    fn handle_acme_tab_bar_mouse_event(
+        &mut self,
+        event: &MouseEvent,
+        client_id: ClientId,
+    ) -> Result<bool> {
+        if event.event_type != MouseEventType::Press {
+            return Ok(false);
+        }
+        let max_cols = self.size_for_client(Some(client_id)).cols;
+        let Some(target) = self.acme_tab_bar_hit_target(event.position, max_cols) else {
+            return Ok(false);
+        };
+        match target {
+            AcmeTabBarHitTarget::TabSquare { tab_id, position } => {
+                if event.ctrl && event.left {
+                    self.request_new_acme_tab(client_id)?;
+                    return Ok(true);
+                }
+                if event.middle {
+                    self.close_tab_by_id(tab_id)?;
+                    return Ok(true);
+                }
+                self.handle_acme_tab_mouse_event(event, position, client_id)?;
+            },
+            AcmeTabBarHitTarget::Tab { position, .. } => {
+                self.handle_acme_tab_mouse_event(event, position, client_id)?;
+            },
+        }
+        Ok(true)
+    }
+
+    fn handle_acme_tab_mouse_event(
+        &mut self,
+        event: &MouseEvent,
+        position: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        if event.ctrl && event.left {
+            self.switch_active_tab(position, None, true, client_id)?;
+            self.bus
+                .senders
+                .send_to_server(ServerInstruction::ChangeMode(
+                    client_id,
+                    InputMode::RenameTab,
+                    None,
+                ))?;
+            return Ok(());
+        }
+        if event.left && !event.ctrl && !event.alt {
+            self.switch_active_tab(position, None, true, client_id)?;
+            self.render(None)?;
+        }
+        Ok(())
+    }
+
+    fn request_new_acme_tab(&mut self, client_id: ClientId) -> Result<()> {
+        let is_web_client = self.client_is_web(client_id);
+        self.bus.senders.send_to_screen(ScreenInstruction::NewTab(
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            (None, None),
+            None,
+            false,
+            true,
+            (client_id, is_web_client),
+            None,
+        ))
+    }
+
     pub fn render_to_clients(&mut self) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
@@ -4407,7 +4729,9 @@ impl Screen {
                 }
             }
 
-            if non_watcher_output_was_dirty || has_bell {
+            self.render_acme_tab_bar(&mut output).context(err_context)?;
+
+            if non_watcher_output_was_dirty || has_bell || self.acme_tab_bar_enabled() {
                 let serialized_output = output.serialize().context(err_context)?;
                 if !serialized_output.is_empty() {
                     let _ = self
@@ -4418,8 +4742,7 @@ impl Screen {
                 }
             }
 
-            let single_pane_names_changed = self.update_single_pane_tab_names();
-            if bell_state_changed || single_pane_names_changed {
+            if bell_state_changed {
                 self.log_and_report_session_state()?;
             }
         } else {
@@ -4475,6 +4798,8 @@ impl Screen {
                         tab.set_force_render();
                     }
                     tab.render(&mut watcher_output, Some(followed_client_id))
+                        .context(err_context)?;
+                    self.render_acme_tab_bar_for_client(&mut watcher_output, followed_client_id)
                         .context(err_context)?;
                 }
 
@@ -5428,9 +5753,7 @@ impl Screen {
                 let selectable_floating_panes_count = tab.get_selectable_floating_panes_count();
                 let tab_info_for_plugins = TabInfo {
                     position: tab.position,
-                    name: tab
-                        .single_pane_tab_name()
-                        .unwrap_or_else(|| tab.name.clone()),
+                    name: tab.name.clone(),
                     active: *active_tab_index == tab.id,
                     panes_to_hide: tab.panes_to_hide_count(),
                     is_fullscreen_active: tab.is_fullscreen_active(),
@@ -5552,19 +5875,6 @@ impl Screen {
         }
     }
 
-    fn update_single_pane_tab_names(&mut self) -> bool {
-        let current: HashMap<usize, Option<String>> = self
-            .tabs
-            .values()
-            .map(|tab| (tab.id, tab.single_pane_tab_name()))
-            .collect();
-        if current != self.last_single_pane_tab_names {
-            self.last_single_pane_tab_names = current;
-            true
-        } else {
-            false
-        }
-    }
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || format!("Failed to log and report session state");
 
@@ -7393,6 +7703,14 @@ impl Screen {
             && !event.middle
             && !event.wheel_up
             && !event.wheel_down;
+        match self.handle_acme_tab_bar_mouse_event(&event, client_id) {
+            Ok(true) => return,
+            Ok(false) => {},
+            Err(e) => {
+                log::error!("Failed to process Acme tab bar MouseEvent: {}", e);
+                return;
+            },
+        }
         let active_pane_id_before = self
             .get_active_tab(client_id)
             .ok()

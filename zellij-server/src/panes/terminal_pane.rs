@@ -1182,9 +1182,6 @@ impl Pane for TerminalPane {
             Some(self.pane_name.clone())
         }
     }
-    fn has_explicit_title(&self) -> bool {
-        !self.pane_name.is_empty() || self.grid.title.is_some()
-    }
     fn scroll_position(&self) -> (usize, usize) {
         self.grid.scrollback_position_and_length()
     }

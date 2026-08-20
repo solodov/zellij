@@ -999,8 +999,8 @@ impl PaneFrame {
     fn render_acme_title_line(&self) -> Vec<TerminalCharacter> {
         // Frameless titles with a right content offset lose their last cell to
         // the vertical boundary renderer, so reserve one extra status pad cell.
-        let status_trailing_spaces = 1
-            + usize::from(self.content_offset.right != 0 && !self.should_draw_pane_frames);
+        let status_trailing_spaces =
+            1 + usize::from(self.content_offset.right != 0 && !self.should_draw_pane_frames);
         render_acme_title_line_for_pane(
             &self.title,
             self.geom.cols,
@@ -1768,7 +1768,10 @@ mod tests {
             ..Default::default()
         };
         let (chunks, _) = frame.render().unwrap();
-        assert_eq!(characters_to_string(&chunks[0].terminal_characters), " □ termflow  ⠋ ");
+        assert_eq!(
+            characters_to_string(&chunks[0].terminal_characters),
+            " □ termflow  ⠋ "
+        );
 
         frame.is_main_client = true;
         let active_title_line = frame.render_one_line_title().unwrap();

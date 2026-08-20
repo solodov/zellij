@@ -22,8 +22,7 @@ fn acme_long_running_command_spinner(running_since: Option<Instant>) -> Option<c
         return None;
     }
     let frame_index = ((elapsed_ms - ACME_LONG_RUNNING_COMMAND_THRESHOLD_MS)
-        / ACME_LONG_RUNNING_COMMAND_SPINNER_INTERVAL_MS)
-        as usize
+        / ACME_LONG_RUNNING_COMMAND_SPINNER_INTERVAL_MS) as usize
         % ACME_LONG_RUNNING_COMMAND_SPINNER_FRAMES.len();
     Some(ACME_LONG_RUNNING_COMMAND_SPINNER_FRAMES[frame_index])
 }
