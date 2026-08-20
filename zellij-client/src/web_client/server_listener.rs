@@ -90,7 +90,7 @@ pub fn zellij_server_listener(
 
                     let palette = config
                         .theme_config(config_options.theme.as_ref())
-                        .unwrap_or_else(|| os_input.load_palette().into());
+                        .unwrap_or_default();
                     let client_attributes = zellij_utils::ipc::ClientAttributes {
                         size: full_screen_ws,
                         style: Style {

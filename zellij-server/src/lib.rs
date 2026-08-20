@@ -76,7 +76,7 @@ use zellij_utils::{
         plugins::PluginAliases,
     },
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
-    shared::{default_palette, web_server_base_url},
+    shared::web_server_base_url,
 };
 
 pub type ClientId = u16;
@@ -451,7 +451,7 @@ impl SessionMetaData {
                         .unwrap_or_else(Default::default),
                     theme: new_config
                         .theme_config(new_config.options.theme.as_ref())
-                        .unwrap_or_else(|| default_palette().into()),
+                        .unwrap_or_default(),
                     host_theme_dark,
                     host_theme_light,
                     explicit_theme_hue: new_config.options.explicit_theme_hue,
@@ -1029,7 +1029,7 @@ pub fn start_server_impl(
                     style: Style {
                         colors: config
                             .theme_config(runtime_config_options.theme.as_ref())
-                            .unwrap_or_else(|| default_palette().into()),
+                            .unwrap_or_default(),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
                     },
@@ -1212,7 +1212,7 @@ pub fn start_server_impl(
                     style: Style {
                         colors: config
                             .theme_config(runtime_config_options.theme.as_ref())
-                            .unwrap_or_else(|| default_palette().into()),
+                            .unwrap_or_default(),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
                     },

@@ -1,6 +1,6 @@
 use super::{
-    screen_thread_main, AcmeTabBarHitTarget, AcmeTabBarSegment, CopyOptions, Screen,
-    ScreenInstruction,
+    acme_tab_bar_style, screen_thread_main, AcmeTabBarHitTarget, AcmeTabBarSegment, CopyOptions,
+    Screen, ScreenInstruction, ACME_ACTIVE_TAB_BAR_FOREGROUND, ACME_INACTIVE_TAB_BAR_FOREGROUND,
 };
 use crate::panes::kitty_graphics::KittyImageStore;
 use crate::panes::PaneId;
@@ -952,6 +952,21 @@ fn acme_tab_bar_segment_hit_target_treats_square_padding_as_square() {
     for column in [7, 8, 9] {
         assert_eq!(segment.hit_target_at(column), None);
     }
+}
+
+#[test]
+fn acme_tab_bar_inactive_style_uses_muted_foreground() {
+    let active_style = acme_tab_bar_style(true);
+    let inactive_style = acme_tab_bar_style(false);
+
+    assert_eq!(
+        active_style.foreground,
+        Some(ACME_ACTIVE_TAB_BAR_FOREGROUND)
+    );
+    assert_eq!(
+        inactive_style.foreground,
+        Some(ACME_INACTIVE_TAB_BAR_FOREGROUND)
+    );
 }
 
 #[test]

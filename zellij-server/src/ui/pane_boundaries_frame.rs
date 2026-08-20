@@ -1,7 +1,6 @@
 use crate::output::CharacterChunk;
 use crate::panes::{
-    AnsiCode, CharacterStyles, NamedColor, RcCharacterStyles, TerminalCharacter,
-    EMPTY_TERMINAL_CHARACTER,
+    AnsiCode, CharacterStyles, RcCharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
 };
 use crate::tab::GuestChoiceIndicator;
 use crate::ui::boundaries::boundary_type;
@@ -62,7 +61,8 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
 }
 
 const ACME_TITLE_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xdd, 0xf7, 0xff));
-const ACME_TITLE_BUTTON_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x5f, 0x3d, 0xd6));
+const ACME_ACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x6a));
+const ACME_INACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x4a, 0x74, 0x80));
 const ACME_ACTIVE_TITLE_BUTTON: char = '■';
 const ACME_INACTIVE_TITLE_BUTTON: char = '□';
 
@@ -143,7 +143,7 @@ fn acme_title_style(is_main_client: bool) -> RcCharacterStyles {
     let mut styles = RcCharacterStyles::reset();
     styles.update(|styles| {
         styles.background = Some(ACME_TITLE_BACKGROUND);
-        styles.foreground = Some(AnsiCode::NamedColor(NamedColor::Black));
+        styles.foreground = Some(acme_title_foreground(is_main_client));
         styles.underline = Some(AnsiCode::Underline(None));
         if is_main_client {
             styles.bold = Some(AnsiCode::On);
@@ -154,14 +154,17 @@ fn acme_title_style(is_main_client: bool) -> RcCharacterStyles {
     styles
 }
 
+fn acme_title_foreground(is_main_client: bool) -> AnsiCode {
+    if is_main_client {
+        ACME_ACTIVE_TITLE_FOREGROUND
+    } else {
+        ACME_INACTIVE_TITLE_FOREGROUND
+    }
+}
+
 fn acme_title_button_style(is_main_client: bool) -> RcCharacterStyles {
     let mut styles = acme_title_style(is_main_client);
     styles.update(|styles| {
-        styles.foreground = if is_main_client {
-            Some(ACME_TITLE_BUTTON_FOREGROUND)
-        } else {
-            Some(AnsiCode::NamedColor(NamedColor::Black))
-        };
         styles.bold = Some(AnsiCode::Reset);
     });
     styles
@@ -1681,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn acme_active_title_uses_underlined_bold_black_text_and_purple_button() {
+    fn acme_active_title_uses_underlined_bold_blue_text_and_matching_button() {
         let mut frame = pane_frame_with(false, false, 16);
         frame.title = "termflow".to_owned();
         frame.should_draw_pane_frames = false;
@@ -1693,11 +1696,11 @@ mod tests {
         assert_eq!(title_line[1].character, ACME_ACTIVE_TITLE_BUTTON);
         assert_eq!(
             title_line[1].styles.foreground,
-            Some(ACME_TITLE_BUTTON_FOREGROUND)
+            Some(ACME_ACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(
             title_line[3].styles.foreground,
-            Some(AnsiCode::NamedColor(NamedColor::Black))
+            Some(ACME_ACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(title_line[3].styles.bold, Some(AnsiCode::On));
         assert_eq!(
@@ -1711,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn acme_inactive_title_uses_underlined_hollow_black_button_and_normal_black_text() {
+    fn acme_inactive_title_uses_underlined_hollow_muted_blue_button_and_text() {
         let mut frame = pane_frame_with(false, false, 16);
         frame.title = "termflow".to_owned();
         frame.is_main_client = false;
@@ -1724,12 +1727,12 @@ mod tests {
         assert_eq!(title_line[1].character, ACME_INACTIVE_TITLE_BUTTON);
         assert_eq!(
             title_line[1].styles.foreground,
-            Some(AnsiCode::NamedColor(NamedColor::Black))
+            Some(ACME_INACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(title_line[1].styles.bold, Some(AnsiCode::Reset));
         assert_eq!(
             title_line[3].styles.foreground,
-            Some(AnsiCode::NamedColor(NamedColor::Black))
+            Some(ACME_INACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(title_line[3].styles.bold, Some(AnsiCode::Reset));
         assert_eq!(
@@ -1756,7 +1759,7 @@ mod tests {
         assert_eq!(title_line[14].character, '⠋');
         assert_eq!(
             title_line[14].styles.foreground,
-            Some(AnsiCode::NamedColor(NamedColor::Black))
+            Some(ACME_INACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(
             title_line[15].styles.background,
@@ -1777,7 +1780,7 @@ mod tests {
         let active_title_line = frame.render_one_line_title().unwrap();
         assert_eq!(
             active_title_line[14].styles.foreground,
-            Some(ACME_TITLE_BUTTON_FOREGROUND)
+            Some(ACME_ACTIVE_TITLE_FOREGROUND)
         );
     }
 
@@ -1805,7 +1808,7 @@ mod tests {
         assert_eq!(inactive_title_line[1].character, ACME_INACTIVE_TITLE_BUTTON);
         assert_eq!(
             inactive_title_line[1].styles.foreground,
-            Some(AnsiCode::NamedColor(NamedColor::Black))
+            Some(ACME_INACTIVE_TITLE_FOREGROUND)
         );
         assert_eq!(inactive_title_line[3].styles.bold, Some(AnsiCode::Reset));
     }

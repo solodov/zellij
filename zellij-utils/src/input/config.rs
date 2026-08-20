@@ -201,10 +201,17 @@ impl TryFrom<&CliArgs> for Config {
 }
 
 impl Config {
+    /// Resolves a configured theme, falling back to built-in styling for the
+    /// implicit or named `default` theme.
     pub fn theme_config(&self, theme_name: Option<&String>) -> Option<Styling> {
-        match &theme_name {
+        match theme_name.map(String::as_str) {
+            Some("default") | None => Some(
+                self.themes
+                    .get_theme("default")
+                    .map(|theme| theme.palette)
+                    .unwrap_or_default(),
+            ),
             Some(theme_name) => self.themes.get_theme(theme_name).map(|theme| theme.palette),
-            None => self.themes.get_theme("default").map(|theme| theme.palette),
         }
     }
     /// Gets default configuration from assets
@@ -745,6 +752,18 @@ mod config_test {
         let opts = CliArgs::default();
         let result = Config::try_from(&opts);
         assert_eq!(result.unwrap(), Config::from_default_assets().unwrap());
+    }
+
+    #[test]
+    fn theme_config_uses_builtin_default_styling() {
+        let config = Config::from_kdl("", None).unwrap();
+        let default_theme = "default".to_owned();
+
+        assert_eq!(config.theme_config(None), Some(Styling::default()));
+        assert_eq!(
+            config.theme_config(Some(&default_theme)),
+            Some(Styling::default())
+        );
     }
 
     #[test]

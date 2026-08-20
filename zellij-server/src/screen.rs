@@ -115,7 +115,8 @@ use zellij_utils::{
 use crate::mobile_web::MobileWebPrefs;
 
 const ACME_TAB_BAR_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xe4, 0xf6, 0xd3));
-const ACME_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x2a));
+const ACME_ACTIVE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x2a));
+const ACME_INACTIVE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x4f, 0x7c, 0x55));
 const ACME_ACTIVE_TAB_BUTTON: char = '■';
 const ACME_INACTIVE_TAB_BUTTON: char = '□';
 const ACME_TAB_BAR_Z_INDEX: usize = usize::MAX;
@@ -172,7 +173,11 @@ fn acme_tab_bar_style_with_background(active: bool, background: AnsiCode) -> RcC
     let mut styles = RcCharacterStyles::reset();
     styles.update(|styles| {
         styles.background = Some(background);
-        styles.foreground = Some(ACME_TAB_BAR_FOREGROUND);
+        styles.foreground = Some(if active {
+            ACME_ACTIVE_TAB_BAR_FOREGROUND
+        } else {
+            ACME_INACTIVE_TAB_BAR_FOREGROUND
+        });
         styles.underline = Some(AnsiCode::Underline(None));
         styles.bold = Some(if active {
             AnsiCode::On
