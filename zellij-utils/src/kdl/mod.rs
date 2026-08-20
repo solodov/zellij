@@ -13,7 +13,7 @@ use crate::input::layout::{
     Layout, PercentOrFixed, PluginUserConfiguration, RunPlugin, RunPluginOrAlias, TabLayoutInfo,
 };
 use crate::input::options::{
-    Clipboard, OnForceClose, Options, PaneFrameStyle, DEFAULT_WORD_SEPARATORS,
+    zacme_defaults, Clipboard, OnForceClose, Options, PaneFrameStyle, DEFAULT_WORD_SEPARATORS,
 };
 use crate::input::permission::{GrantedPermission, PermissionCache};
 use crate::input::plugins::PluginAliases;
@@ -3078,13 +3078,24 @@ impl Options {
         Options::from_kdl(&document)
     }
     fn simplified_ui_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let default_value = zacme_defaults::SIMPLIFIED_UI;
+        let true_label = if default_value {
+            "//   - true (Default)"
+        } else {
+            "//   - true"
+        };
+        let false_label = if default_value {
+            "//   - false"
+        } else {
+            "//   - false (Default)"
+        };
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Use a simplified UI without special fonts (arrow glyphs)",
             "// Options:",
-            "//   - true",
-            "//   - false (Default)",
+            true_label,
+            false_label,
             "// ",
         );
 
@@ -3100,7 +3111,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(true);
+            let mut node = create_node(!default_value);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4271,9 +4282,13 @@ impl Options {
         }
     }
     fn show_startup_tips_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let default_value = zacme_defaults::SHOW_STARTUP_TIPS;
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
-            " ", "// Whether to show tips on startup", "// Default: true", "// ",
+            " ",
+            "// Whether to show tips on startup",
+            format!("// Default: {default_value}"),
+            "// ",
         );
 
         let create_node = |node_value: bool| -> KdlNode {
@@ -4288,7 +4303,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(false);
+            let mut node = create_node(!default_value);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4400,11 +4415,12 @@ impl Options {
         }
     }
     fn mouse_hover_tips_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let default_value = zacme_defaults::MOUSE_HOVER_TIPS;
         let comment_text = format!(
             "{}\n{}\n{}",
             " ",
             "// Whether to show mouse hover help-text tips (resize help and group shortcuts)",
-            "// default is true",
+            format!("// default is {default_value}"),
         );
 
         let create_node = |node_value: bool| -> KdlNode {
@@ -4419,7 +4435,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(false);
+            let mut node = create_node(!default_value);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4427,11 +4443,12 @@ impl Options {
         }
     }
     fn mouse_hover_effects_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let default_value = zacme_defaults::MOUSE_HOVER_EFFECTS;
         let comment_text = format!(
             "{}\n{}\n{}",
             " ",
             "// Whether to enable mouse hover visual effects (frame highlight and help text)",
-            "// default is true",
+            format!("// default is {default_value}"),
         );
 
         let create_node = |node_value: bool| -> KdlNode {
@@ -4446,7 +4463,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(false);
+            let mut node = create_node(!default_value);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4481,9 +4498,12 @@ impl Options {
         }
     }
     fn focus_follows_mouse_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let default_value = zacme_defaults::FOCUS_FOLLOWS_MOUSE;
         let comment_text = format!(
             "{}\n{}\n{}",
-            " ", "// Whether to focus panes on mouse hover", "// default is false",
+            " ",
+            "// Whether to focus panes on mouse hover",
+            format!("// default is {default_value}"),
         );
 
         let create_node = |node_value: bool| -> KdlNode {
@@ -4498,7 +4518,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(false);
+            let mut node = create_node(!default_value);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {

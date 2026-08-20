@@ -42,7 +42,7 @@ use zellij_utils::envs;
 use zellij_utils::pane_size::Size;
 
 use zellij_utils::input::cli_assets::CliAssets;
-use zellij_utils::input::options::{PaneFrameStyle, DEFAULT_WORD_SEPARATORS};
+use zellij_utils::input::options::{zacme_defaults, PaneFrameStyle, DEFAULT_WORD_SEPARATORS};
 
 use wasmi::Engine;
 
@@ -455,7 +455,7 @@ impl SessionMetaData {
                     host_theme_dark,
                     host_theme_light,
                     explicit_theme_hue: new_config.options.explicit_theme_hue,
-                    simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
+                    simplified_ui: zacme_defaults::simplified_ui(new_config.options.simplified_ui),
                     default_shell: new_config.options.default_shell,
                     pane_frame_style,
                     copy_command: new_config.options.copy_command,
@@ -473,10 +473,16 @@ impl SessionMetaData {
                         .unwrap_or(true),
                     mouse_scroll_resize: new_config.options.mouse_scroll_resize.unwrap_or(true),
                     scroll_mode_sync: new_config.options.scroll_mode_sync.unwrap_or(true),
-                    mouse_hover_effects: new_config.options.mouse_hover_effects.unwrap_or(true),
-                    mouse_hover_tips: new_config.options.mouse_hover_tips.unwrap_or(true),
+                    mouse_hover_effects: zacme_defaults::mouse_hover_effects(
+                        new_config.options.mouse_hover_effects,
+                    ),
+                    mouse_hover_tips: zacme_defaults::mouse_hover_tips(
+                        new_config.options.mouse_hover_tips,
+                    ),
                     visual_bell: new_config.options.visual_bell.unwrap_or(true),
-                    focus_follows_mouse: new_config.options.focus_follows_mouse.unwrap_or(false),
+                    focus_follows_mouse: zacme_defaults::focus_follows_mouse(
+                        new_config.options.focus_follows_mouse,
+                    ),
                     mouse_click_through: new_config.options.mouse_click_through.unwrap_or(false),
                     osc133_command_selection: new_config
                         .options
@@ -1150,7 +1156,9 @@ pub fn start_server_impl(
                         let about = about_floating_pane();
                         floating_panes.push(about);
                     } else if should_show_startup_tip(
-                        runtime_config_options.show_startup_tips,
+                        zacme_defaults::show_startup_tips(
+                            runtime_config_options.show_startup_tips,
+                        ),
                         layout_is_welcome_screen,
                     ) {
                         let tip = tip_floating_pane();
@@ -2410,14 +2418,10 @@ fn should_show_release_notes(
 }
 
 fn should_show_startup_tip(
-    should_show_startup_tip_config: Option<bool>,
+    should_show_startup_tip_config: bool,
     layout_is_welcome_screen: bool,
 ) -> bool {
-    if layout_is_welcome_screen {
-        false
-    } else {
-        should_show_startup_tip_config.unwrap_or(true)
-    }
+    !layout_is_welcome_screen && should_show_startup_tip_config
 }
 
 fn report_changes_in_config_file(

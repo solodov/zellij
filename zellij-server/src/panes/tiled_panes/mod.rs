@@ -680,6 +680,15 @@ impl TiledPanes {
             }
 
             let pane_viewport = &viewport;
+            let pane_geom = pane.current_geom();
+            let native_acme_top_overlap = if native_acme_tab_bar_enabled(self.pane_frame_style)
+                && pane_geom.y < viewport.y
+                && pane_geom.y + pane_geom.rows.as_usize() > viewport.y
+            {
+                viewport.y - pane_geom.y
+            } else {
+                0
+            };
             let reserved_rows = reserved_top_rows.get(&pane.pid()).copied().unwrap_or(0);
 
             #[allow(clippy::if_same_then_else)]
@@ -707,7 +716,7 @@ impl TiledPanes {
                 pane.set_content_offset(Offset::frame(1));
             } else if draws_full_frames && pane.borderless() {
                 pane.set_content_offset(Offset::default());
-            } else if !is_inside_viewport(pane_viewport, pane) {
+            } else if !is_inside_viewport(pane_viewport, pane) && native_acme_top_overlap == 0 {
                 pane.set_content_offset(Offset::default());
             } else {
                 let mut position_and_size = pane.current_geom();
@@ -740,7 +749,7 @@ impl TiledPanes {
                 if reserve_title_row {
                     pane.set_content_offset(Offset::shift_right_top_and_bottom(
                         pane_columns_offset,
-                        1,
+                        1 + native_acme_top_overlap,
                         pane_rows_offset,
                     ));
                 } else {
@@ -1705,16 +1714,34 @@ impl TiledPanes {
                 } else {
                     { self.reserved_top_rows.borrow().get(&pane.pid()).copied() }.unwrap_or(0)
                 };
+                let viewport = *self.viewport.borrow();
+                let pane_geom = pane.current_geom();
+                let native_acme_top_overlap = if native_acme_tab_bar_enabled(self.pane_frame_style)
+                    && pane_geom.y < viewport.y
+                    && pane_geom.y + pane_geom.rows.as_usize() > viewport.y
+                {
+                    viewport.y - pane_geom.y
+                } else {
+                    0
+                };
                 let visible_member_frame_override = if reserved_rows_for_pane > 0 {
                     let mut geom = pane.current_geom();
                     geom.y += reserved_rows_for_pane;
                     geom.rows.decrease_inner(reserved_rows_for_pane);
                     Some(geom)
+                } else if native_acme_top_overlap > 0 {
+                    let mut geom = pane.current_geom();
+                    geom.y += native_acme_top_overlap;
+                    geom.rows.decrease_inner(native_acme_top_overlap);
+                    Some(geom)
                 } else {
                     None
                 };
                 let pane_has_guest_modal = pane.has_guest_modal_for_any_client();
-                let pane_has_acme_title = acme_title_pane_ids.contains(&pane.pid());
+                let pane_has_acme_title = acme_title_pane_ids.contains(&pane.pid())
+                    || (native_acme_tab_bar_enabled(self.pane_frame_style)
+                        && pane_is_selectable
+                        && !pane.borderless());
                 let omit_title = if acme_layout_uses_tag_titles {
                     !pane_has_acme_title
                 } else {

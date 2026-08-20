@@ -58,7 +58,7 @@ use zellij_utils::input::config::Config;
 use zellij_utils::input::keybinds::{shortcut_for_action, Keybinds};
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::{
-    Clipboard, HostNotificationProtocol, NestedSessionHandling, PaneFrameStyle,
+    zacme_defaults, Clipboard, HostNotificationProtocol, NestedSessionHandling, PaneFrameStyle,
     DEFAULT_WORD_SEPARATORS,
 };
 use zellij_utils::ipc::{
@@ -8519,7 +8519,7 @@ pub(crate) fn screen_thread_main(
     let host_notification_protocol = config_options
         .host_notification_protocol
         .unwrap_or_default();
-    let arrow_fonts = !config_options.simplified_ui.unwrap_or_default();
+    let arrow_fonts = !zacme_defaults::simplified_ui(config_options.simplified_ui);
     let pane_frame_style = PaneFrameStyle::from_options(&config_options);
     let auto_layout = config_options.auto_layout.unwrap_or(true);
     let session_serialization = config_options.session_serialization.unwrap_or(true);
@@ -8580,10 +8580,12 @@ pub(crate) fn screen_thread_main(
         .unwrap_or_else(|| DEFAULT_WORD_SEPARATORS.to_owned());
     let mouse_scroll_resize = config_options.mouse_scroll_resize.unwrap_or(true);
     let scroll_mode_sync = config_options.scroll_mode_sync.unwrap_or(true);
-    let mouse_hover_effects = config_options.mouse_hover_effects.unwrap_or(true);
-    let mouse_hover_tips = config_options.mouse_hover_tips.unwrap_or(true);
+    let mouse_hover_effects =
+        zacme_defaults::mouse_hover_effects(config_options.mouse_hover_effects);
+    let mouse_hover_tips = zacme_defaults::mouse_hover_tips(config_options.mouse_hover_tips);
     let visual_bell = config_options.visual_bell.unwrap_or(true);
-    let focus_follows_mouse = config_options.focus_follows_mouse.unwrap_or(false);
+    let focus_follows_mouse =
+        zacme_defaults::focus_follows_mouse(config_options.focus_follows_mouse);
     let mouse_click_through = config_options.mouse_click_through.unwrap_or(false);
     let nested_session_handling = config_options.nested_session_handling.unwrap_or_default();
     let dangerously_enable_paste_buffer_read = config_options

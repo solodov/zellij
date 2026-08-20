@@ -10,6 +10,35 @@ use std::net::IpAddr;
 
 pub const DEFAULT_WORD_SEPARATORS: &str = "[]{}<>()";
 
+/// Defaults that intentionally diverge from upstream for the Zacme fork.
+pub mod zacme_defaults {
+    pub const SIMPLIFIED_UI: bool = true;
+    pub const SHOW_STARTUP_TIPS: bool = false;
+    pub const MOUSE_HOVER_EFFECTS: bool = false;
+    pub const MOUSE_HOVER_TIPS: bool = true;
+    pub const FOCUS_FOLLOWS_MOUSE: bool = true;
+
+    pub fn simplified_ui(value: Option<bool>) -> bool {
+        value.unwrap_or(SIMPLIFIED_UI)
+    }
+
+    pub fn show_startup_tips(value: Option<bool>) -> bool {
+        value.unwrap_or(SHOW_STARTUP_TIPS)
+    }
+
+    pub fn mouse_hover_effects(value: Option<bool>) -> bool {
+        value.unwrap_or(MOUSE_HOVER_EFFECTS)
+    }
+
+    pub fn mouse_hover_tips(value: Option<bool>) -> bool {
+        value.unwrap_or(MOUSE_HOVER_TIPS)
+    }
+
+    pub fn focus_follows_mouse(value: Option<bool>) -> bool {
+        value.unwrap_or(FOCUS_FOLLOWS_MOUSE)
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize, ValueEnum)]
 pub enum OnForceClose {
     #[serde(alias = "quit")]
@@ -320,7 +349,7 @@ pub struct Options {
     pub stacked_pane_list: Option<bool>,
 
     /// Whether to show startup tips when starting a new session
-    /// default is true
+    /// Zacme default is false
     #[clap(long, value_parser)]
     #[serde(default)]
     pub show_startup_tips: Option<bool>,
@@ -350,13 +379,13 @@ pub struct Options {
     pub scroll_mode_sync: Option<bool>,
 
     /// Whether to enable mouse hover visual effects (frame highlight and help text)
-    /// default is true
+    /// Zacme default is false
     #[clap(long, value_parser)]
     #[serde(default)]
     pub mouse_hover_effects: Option<bool>,
 
     /// Whether to show mouse hover help-text tips (resize help and group shortcuts)
-    /// default is true
+    /// Zacme default is true
     #[clap(long, value_parser)]
     #[serde(default)]
     pub mouse_hover_tips: Option<bool>,
@@ -368,7 +397,7 @@ pub struct Options {
     pub visual_bell: Option<bool>,
 
     /// Whether to focus panes on mouse hover (true or false)
-    /// default is false
+    /// Zacme default is true
     #[clap(long, value_parser)]
     #[serde(default)]
     pub focus_follows_mouse: Option<bool>,
@@ -507,6 +536,7 @@ impl Options {
             Options::default()
         }
     }
+
     /// Merges two [`Options`] structs, a `Some` in `other`
     /// will supersede a `Some` in `self`
     // TODO: Maybe a good candidate for a macro?

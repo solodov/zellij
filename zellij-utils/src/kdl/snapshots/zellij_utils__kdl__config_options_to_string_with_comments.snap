@@ -5,8 +5,8 @@ expression: fake_document.to_string()
  
 // Use a simplified UI without special fonts (arrow glyphs)
 // Options:
-//   - true
-//   - false (Default)
+//   - true (Default)
+//   - false
 // 
 simplified_ui true
  
@@ -273,9 +273,9 @@ web_sharing "disabled"
 // stacked_pane_list false
  
 // Whether to show tips on startup
-// Default: true
+// Default: false
 // 
-// show_startup_tips false
+// show_startup_tips true
  
 // Whether to show release notes on first version run
 // Default: true
@@ -295,7 +295,7 @@ web_sharing "disabled"
 // scroll_mode_sync false
  
 // Whether to enable mouse hover visual effects (frame highlight and help text)
-// default is true
+// default is false
 // mouse_hover_effects false
  
 // Whether to show mouse hover help-text tips (resize help and group shortcuts)
@@ -307,7 +307,7 @@ web_sharing "disabled"
 // visual_bell true
  
 // Whether to focus panes on mouse hover
-// default is false
+// default is true
 // focus_follows_mouse false
  
 // Whether clicking a pane to focus it also sends the click into the pane

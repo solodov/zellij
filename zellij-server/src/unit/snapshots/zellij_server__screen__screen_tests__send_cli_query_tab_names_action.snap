@@ -5,8 +5,8 @@ expression: "format!(\"{:#?}\", log_tab_names_instruction)"
 Some(
     Log(
         [
-            "Tab #1",
-            "Tab #2",
+            "tab1",
+            "tab2",
         ],
         10,
         Some(

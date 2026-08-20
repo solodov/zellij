@@ -1047,21 +1047,21 @@ pub fn switch_to_tab_name() {
 
     assert_eq!(
         screen
-            .switch_active_tab_name("Tab #1".to_string(), 1)
+            .switch_active_tab_name("tab1".to_string(), 1)
             .expect("TEST"),
         false,
         "Active tab switched to tab by name"
     );
     assert_eq!(
         screen
-            .switch_active_tab_name("Tab #2".to_string(), 1)
+            .switch_active_tab_name("tab2".to_string(), 1)
             .expect("TEST"),
         true,
         "Active tab switched to tab by name"
     );
     assert_eq!(
         screen
-            .switch_active_tab_name("Tab #3".to_string(), 1)
+            .switch_active_tab_name("tab3".to_string(), 1)
             .expect("TEST"),
         true,
         "Active tab switched to tab by name"
@@ -5528,8 +5528,8 @@ pub fn rename_tab_by_id_verifies_screen_state() {
     new_tab(&mut screen, 2, 1); // ID 1
 
     // Verify initial tab names
-    assert_eq!(screen.get_tab_by_id(0).unwrap().name, "Tab #1");
-    assert_eq!(screen.get_tab_by_id(1).unwrap().name, "Tab #2");
+    assert_eq!(screen.get_tab_by_id(0).unwrap().name, "tab1");
+    assert_eq!(screen.get_tab_by_id(1).unwrap().name, "tab2");
 
     // Rename tab with ID 1
     if let Some(tab) = screen.get_tab_by_id_mut(1) {
@@ -5546,7 +5546,7 @@ pub fn rename_tab_by_id_verifies_screen_state() {
     // Verify other tab name unchanged
     assert_eq!(
         screen.get_tab_by_id(0).unwrap().name,
-        "Tab #1",
+        "tab1",
         "Tab with ID 0 should keep original name"
     );
 }
