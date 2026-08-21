@@ -8,6 +8,7 @@ use zellij_utils::{
 };
 
 pub(super) const ACME_COLLAPSED_PANE_ROWS: usize = 1;
+pub(super) const ACME_EXTRACT_COLUMN_EDGE_THRESHOLD: usize = 3;
 pub(super) const ACME_TITLE_BUTTON_COLUMN_OFFSET: usize = 1;
 pub(super) const ACME_BOUNDARY_COLOR: Option<(PaletteColor, usize)> =
     Some((PaletteColor::Rgb((0x5a, 0xae, 0xc6)), 0));
@@ -397,6 +398,56 @@ pub(super) fn acme_geometries_after_moving_pane_to_position(
     Ok(planned_geometries_for_columns(columns, viewport))
 }
 
+/// Plan extracting a pane into a new column after its current column.
+pub(super) fn acme_geometries_after_extracting_pane_to_new_column(
+    columns: &[AcmeColumn],
+    pane_id: PaneId,
+    release_column: usize,
+    viewport: Viewport,
+    minimum_column_width: usize,
+) -> Result<Vec<(PaneId, PaneGeom)>> {
+    let source_column_index = columns
+        .iter()
+        .position(|column| column.contains_pane(pane_id))
+        .ok_or_else(|| anyhow!("Pane is not in an Acme column"))?;
+    let source_column = &columns[source_column_index];
+    if source_column.pane_geometries.len() == 1
+        || !acme_release_is_in_extract_column_zone(source_column, release_column)
+    {
+        return Ok(vec![]);
+    }
+    if viewport.cols < (columns.len() + 1) * minimum_column_width {
+        return Err(anyhow!("Not enough room to extract Acme pane"));
+    }
+
+    let mut columns = columns.to_vec();
+    let source_pane_index = columns[source_column_index]
+        .pane_geometries
+        .iter()
+        .position(|pane_geometry| pane_geometry.pane_id == pane_id)
+        .ok_or_else(|| anyhow!("Pane is not in an Acme column"))?;
+    let mut moving_pane = columns[source_column_index].pane_geometries[source_pane_index].clone();
+    moving_pane.geom.y = viewport.y;
+    moving_pane.geom.rows = percent_dimension(viewport.rows, viewport.rows);
+    moving_pane.geom.stacked = None;
+
+    resize_acme_column_after_removing_pane(
+        &mut columns[source_column_index],
+        source_pane_index,
+        viewport,
+    )?;
+    columns.insert(
+        source_column_index + 1,
+        AcmeColumn {
+            x: viewport.x,
+            cols: viewport.cols,
+            pane_geometries: vec![moving_pane],
+        },
+    );
+    equalize_acme_column_widths(&mut columns, viewport)?;
+    Ok(planned_geometries_for_columns(columns, viewport))
+}
+
 /// Plan a same-column Acme pane reorder without mutating live panes.
 pub(super) fn acme_geometries_after_reordering_pane(
     columns: &[AcmeColumn],
@@ -622,6 +673,13 @@ fn acme_column_index_at_position(columns: &[AcmeColumn], position_column: usize)
         .position(|column| position_column >= column.x && position_column < column.x + column.cols)
 }
 
+fn acme_release_is_in_extract_column_zone(column: &AcmeColumn, release_column: usize) -> bool {
+    let extract_zone_start = column
+        .x
+        .saturating_add(column.cols.saturating_sub(ACME_EXTRACT_COLUMN_EDGE_THRESHOLD));
+    release_column >= extract_zone_start && release_column < column.x + column.cols
+}
+
 fn acme_insert_index_at_line(column: &AcmeColumn, line: isize) -> usize {
     acme_pane_index_at_line(column, line)
         .map(|pane_index| pane_index + 1)
@@ -666,6 +724,20 @@ fn stack_acme_column_rows(column: &mut AcmeColumn, viewport: Viewport) -> Result
     }
     if next_y != viewport.y + viewport.rows {
         return Err(anyhow!("Acme column does not fill the viewport height"));
+    }
+    Ok(())
+}
+
+fn equalize_acme_column_widths(columns: &mut [AcmeColumn], viewport: Viewport) -> Result<()> {
+    let widths = equalized_lengths(viewport.cols, columns.len());
+    let mut next_x = viewport.x;
+    for (column, width) in columns.iter_mut().zip(widths) {
+        column.x = next_x;
+        column.cols = width;
+        next_x += width;
+    }
+    if next_x != viewport.x + viewport.cols {
+        return Err(anyhow!("Acme columns do not fill the viewport width"));
     }
     Ok(())
 }
@@ -777,6 +849,34 @@ fn expand_acme_columns_after_removing_column(
 mod tests {
     use super::*;
 
+    fn pane_geometry(
+        pane_id: u32,
+        x: usize,
+        y: usize,
+        cols: usize,
+        rows: usize,
+    ) -> AcmePaneGeometry {
+        AcmePaneGeometry {
+            pane_id: PaneId::Terminal(pane_id),
+            geom: PaneGeom {
+                x,
+                y,
+                cols: Dimension::fixed(cols),
+                rows: Dimension::fixed(rows),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn planned_geom(planned_geometries: &[(PaneId, PaneGeom)], pane_id: u32) -> PaneGeom {
+        planned_geometries
+            .iter()
+            .find_map(|(planned_pane_id, geom)| {
+                (*planned_pane_id == PaneId::Terminal(pane_id)).then_some(*geom)
+            })
+            .unwrap_or_else(|| panic!("missing planned geometry for pane {pane_id}"))
+    }
+
     #[test]
     fn acme_title_boundary_segments_include_column_boundary_edges() {
         let columns = vec![AcmeColumn {
@@ -810,5 +910,110 @@ mod tests {
             acme_own_line_title_boundary_segments(&columns),
             vec![(9, 4, 21)]
         );
+    }
+
+    #[test]
+    fn extracting_pane_to_new_column_uses_right_edge_release_zone() {
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            rows: 12,
+            cols: 90,
+        };
+        let columns = vec![
+            AcmeColumn {
+                x: 0,
+                cols: 45,
+                pane_geometries: vec![
+                    pane_geometry(1, 0, 0, 45, 6),
+                    pane_geometry(2, 0, 6, 45, 6),
+                ],
+            },
+            AcmeColumn {
+                x: 45,
+                cols: 45,
+                pane_geometries: vec![pane_geometry(3, 45, 0, 45, 12)],
+            },
+        ];
+
+        let planned_geometries = acme_geometries_after_extracting_pane_to_new_column(
+            &columns,
+            PaneId::Terminal(1),
+            44,
+            viewport,
+            10,
+        )
+        .unwrap();
+
+        let remaining_source_pane = planned_geom(&planned_geometries, 2);
+        assert_eq!(remaining_source_pane.x, 0);
+        assert_eq!(remaining_source_pane.cols.as_usize(), 30);
+        assert_eq!(remaining_source_pane.y, 0);
+        assert_eq!(remaining_source_pane.rows.as_usize(), 12);
+
+        let extracted_pane = planned_geom(&planned_geometries, 1);
+        assert_eq!(extracted_pane.x, 30);
+        assert_eq!(extracted_pane.cols.as_usize(), 30);
+        assert_eq!(extracted_pane.y, 0);
+        assert_eq!(extracted_pane.rows.as_usize(), 12);
+
+        let next_column_pane = planned_geom(&planned_geometries, 3);
+        assert_eq!(next_column_pane.x, 60);
+        assert_eq!(next_column_pane.cols.as_usize(), 30);
+    }
+
+    #[test]
+    fn extracting_pane_to_new_column_ignores_non_edge_release() {
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            rows: 12,
+            cols: 90,
+        };
+        let columns = vec![AcmeColumn {
+            x: 0,
+            cols: 90,
+            pane_geometries: vec![
+                pane_geometry(1, 0, 0, 90, 6),
+                pane_geometry(2, 0, 6, 90, 6),
+            ],
+        }];
+
+        let planned_geometries = acme_geometries_after_extracting_pane_to_new_column(
+            &columns,
+            PaneId::Terminal(1),
+            10,
+            viewport,
+            10,
+        )
+        .unwrap();
+
+        assert!(planned_geometries.is_empty());
+    }
+
+    #[test]
+    fn extracting_pane_to_new_column_ignores_single_pane_columns() {
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            rows: 12,
+            cols: 90,
+        };
+        let columns = vec![AcmeColumn {
+            x: 0,
+            cols: 90,
+            pane_geometries: vec![pane_geometry(1, 0, 0, 90, 12)],
+        }];
+
+        let planned_geometries = acme_geometries_after_extracting_pane_to_new_column(
+            &columns,
+            PaneId::Terminal(1),
+            89,
+            viewport,
+            10,
+        )
+        .unwrap();
+
+        assert!(planned_geometries.is_empty());
     }
 }
