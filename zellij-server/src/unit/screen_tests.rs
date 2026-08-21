@@ -1,6 +1,8 @@
 use super::{
     acme_tab_bar_style, screen_thread_main, AcmeTabBarHitTarget, AcmeTabBarSegment, CopyOptions,
-    Screen, ScreenInstruction, ACME_ACTIVE_TAB_BAR_FOREGROUND, ACME_INACTIVE_TAB_BAR_FOREGROUND,
+    Screen, ScreenInstruction, ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND,
+    ACME_ACTIVE_TAB_BAR_FOREGROUND, ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND,
+    ACME_INACTIVE_TAB_BAR_FOREGROUND, ACME_MODE_TAB_BAR_BACKGROUND, ACME_TAB_BAR_BACKGROUND,
 };
 use crate::panes::kitty_graphics::KittyImageStore;
 use crate::panes::PaneId;
@@ -918,10 +920,35 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         .expect("TEST");
 }
 
+fn create_named_acme_tab_bar_screen(size: Size, names: &[&str]) -> Screen {
+    let mut screen = create_new_screen(size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
+    for (tab_id, name) in names.iter().enumerate() {
+        new_tab(&mut screen, tab_id as u32 + 1, tab_id);
+        screen.tabs.get_mut(&tab_id).unwrap().name = (*name).to_owned();
+    }
+    screen
+}
+
+fn tab_ids_by_position(screen: &Screen) -> Vec<usize> {
+    let mut tabs: Vec<(usize, usize)> = screen
+        .tabs
+        .values()
+        .map(|tab| (tab.position, tab.id))
+        .collect();
+    tabs.sort_by_key(|(position, _)| *position);
+    tabs.into_iter().map(|(_, tab_id)| tab_id).collect()
+}
+
+fn position_on_tab_bar(column: usize) -> Position {
+    Position::new(0, column as u16)
+}
+
 #[test]
 fn acme_tab_bar_segment_hit_target_treats_square_padding_as_square() {
     let segment = AcmeTabBarSegment {
         square_hit_start: 0,
+        square_start: 1,
         square_hit_end: 3,
         name_start: 3,
         name_end: 7,
@@ -955,9 +982,171 @@ fn acme_tab_bar_segment_hit_target_treats_square_padding_as_square() {
 }
 
 #[test]
+fn acme_tab_bar_drag_target_excludes_trailing_padding() {
+    let segment = AcmeTabBarSegment {
+        square_hit_start: 0,
+        square_start: 1,
+        square_hit_end: 3,
+        name_start: 3,
+        name_end: 7,
+        tab_id: 7,
+        position: 2,
+        name: "tab1".to_owned(),
+        active: false,
+    };
+
+    assert_eq!(segment.drag_target_at(0), None);
+    for column in 1..3 {
+        assert_eq!(
+            segment.drag_target_at(column),
+            Some(AcmeTabBarHitTarget::TabSquare {
+                tab_id: 7,
+                position: 2,
+            })
+        );
+    }
+    for column in 3..7 {
+        assert_eq!(
+            segment.drag_target_at(column),
+            Some(AcmeTabBarHitTarget::Tab {
+                tab_id: 7,
+                position: 2,
+            })
+        );
+    }
+    for column in [7, 8, 9] {
+        assert_eq!(segment.drag_target_at(column), None);
+    }
+}
+
+#[test]
+fn acme_tab_drag_release_over_later_tab_moves_after_target() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C", "D"]);
+    let original_order = tab_ids_by_position(&screen);
+    let segments = screen.acme_tab_bar_segments(size.cols, None);
+
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_press_event(position_on_tab_bar(segments[0].square_start)),
+            client_id,
+        )
+        .unwrap();
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_release_event(position_on_tab_bar(segments[2].name_start)),
+            client_id,
+        )
+        .unwrap();
+
+    assert_eq!(
+        tab_ids_by_position(&screen),
+        vec![
+            original_order[1],
+            original_order[2],
+            original_order[0],
+            original_order[3],
+        ]
+    );
+    assert_eq!(
+        screen.active_tab_ids.get(&client_id).copied(),
+        Some(original_order[0])
+    );
+}
+
+#[test]
+fn acme_tab_drag_release_over_earlier_tab_moves_before_target() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C", "D"]);
+    let original_order = tab_ids_by_position(&screen);
+    let segments = screen.acme_tab_bar_segments(size.cols, None);
+
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_press_event(position_on_tab_bar(segments[3].square_start)),
+            client_id,
+        )
+        .unwrap();
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_release_event(position_on_tab_bar(segments[1].name_start)),
+            client_id,
+        )
+        .unwrap();
+
+    assert_eq!(
+        tab_ids_by_position(&screen),
+        vec![
+            original_order[0],
+            original_order[3],
+            original_order[1],
+            original_order[2],
+        ]
+    );
+    assert_eq!(
+        screen.active_tab_ids.get(&client_id).copied(),
+        Some(original_order[3])
+    );
+}
+
+#[test]
+fn acme_tab_drag_release_on_trailing_padding_does_not_reorder() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C"]);
+    let original_order = tab_ids_by_position(&screen);
+    let segments = screen.acme_tab_bar_segments(size.cols, None);
+
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_press_event(position_on_tab_bar(segments[0].square_start)),
+            client_id,
+        )
+        .unwrap();
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_release_event(position_on_tab_bar(segments[2].name_end)),
+            client_id,
+        )
+        .unwrap();
+
+    assert_eq!(tab_ids_by_position(&screen), original_order);
+}
+
+#[test]
+fn acme_tab_square_click_without_drag_still_switches_tabs() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C"]);
+    let original_order = tab_ids_by_position(&screen);
+    let segments = screen.acme_tab_bar_segments(size.cols, None);
+
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_press_event(position_on_tab_bar(segments[0].square_start)),
+            client_id,
+        )
+        .unwrap();
+    screen
+        .handle_acme_tab_bar_mouse_event(
+            &MouseEvent::new_left_release_event(position_on_tab_bar(segments[0].square_start)),
+            client_id,
+        )
+        .unwrap();
+
+    assert_eq!(tab_ids_by_position(&screen), original_order);
+    assert_eq!(
+        screen.active_tab_ids.get(&client_id).copied(),
+        Some(original_order[0])
+    );
+}
+
+#[test]
 fn acme_tab_bar_inactive_style_uses_muted_foreground() {
-    let active_style = acme_tab_bar_style(true);
-    let inactive_style = acme_tab_bar_style(false);
+    let active_style = acme_tab_bar_style(true, Some(InputMode::Normal));
+    let inactive_style = acme_tab_bar_style(false, Some(InputMode::Normal));
 
     assert_eq!(
         active_style.foreground,
@@ -967,6 +1156,42 @@ fn acme_tab_bar_inactive_style_uses_muted_foreground() {
         inactive_style.foreground,
         Some(ACME_INACTIVE_TAB_BAR_FOREGROUND)
     );
+}
+
+#[test]
+fn acme_tab_bar_uses_mode_colors_outside_normal_and_rename_modes() {
+    let active_style = acme_tab_bar_style(true, Some(InputMode::Tmux));
+    let inactive_style = acme_tab_bar_style(false, Some(InputMode::Tmux));
+
+    assert_eq!(active_style.background, Some(ACME_MODE_TAB_BAR_BACKGROUND));
+    assert_eq!(
+        active_style.foreground,
+        Some(ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND)
+    );
+    assert_eq!(inactive_style.background, Some(ACME_MODE_TAB_BAR_BACKGROUND));
+    assert_eq!(
+        inactive_style.foreground,
+        Some(ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND)
+    );
+}
+
+#[test]
+fn acme_tab_bar_rename_modes_keep_normal_colors() {
+    for input_mode in [InputMode::RenameTab, InputMode::RenamePane] {
+        let active_style = acme_tab_bar_style(true, Some(input_mode));
+        let inactive_style = acme_tab_bar_style(false, Some(input_mode));
+
+        assert_eq!(active_style.background, Some(ACME_TAB_BAR_BACKGROUND));
+        assert_eq!(
+            active_style.foreground,
+            Some(ACME_ACTIVE_TAB_BAR_FOREGROUND)
+        );
+        assert_eq!(inactive_style.background, Some(ACME_TAB_BAR_BACKGROUND));
+        assert_eq!(
+            inactive_style.foreground,
+            Some(ACME_INACTIVE_TAB_BAR_FOREGROUND)
+        );
+    }
 }
 
 #[test]

@@ -117,6 +117,9 @@ use crate::mobile_web::MobileWebPrefs;
 const ACME_TAB_BAR_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xe4, 0xf6, 0xd3));
 const ACME_ACTIVE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x2a));
 const ACME_INACTIVE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x4f, 0x7c, 0x55));
+const ACME_MODE_TAB_BAR_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xfb, 0xeb, 0xea));
+const ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xaf, 0x62, 0x60));
+const ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xde, 0x97, 0x95));
 const ACME_ACTIVE_TAB_BUTTON: char = '■';
 const ACME_INACTIVE_TAB_BUTTON: char = '□';
 const ACME_TAB_BAR_Z_INDEX: usize = usize::MAX;
@@ -124,6 +127,15 @@ const ACME_TAB_BAR_LEADING_SPACES: usize = 1;
 const ACME_TAB_BUTTON_WIDTH: usize = 1;
 const ACME_TAB_BUTTON_NAME_SPACES: usize = 1;
 const ACME_TAB_TRAILING_SPACES: usize = 2;
+const ACME_TAB_DRAG_THRESHOLD: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AcmeTabDragState {
+    tab_id: usize,
+    start_position: Position,
+    start_tab_position: usize,
+    is_dragging: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AcmeTabBarHitTarget {
@@ -134,6 +146,7 @@ enum AcmeTabBarHitTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AcmeTabBarSegment {
     square_hit_start: usize,
+    square_start: usize,
     square_hit_end: usize,
     name_start: usize,
     name_end: usize,
@@ -159,24 +172,91 @@ impl AcmeTabBarSegment {
             None
         }
     }
+
+    /// Hit target used for drag release; excludes trailing tab padding.
+    fn drag_target_at(&self, column: usize) -> Option<AcmeTabBarHitTarget> {
+        if column >= self.square_start && column < self.name_start {
+            Some(AcmeTabBarHitTarget::TabSquare {
+                tab_id: self.tab_id,
+                position: self.position,
+            })
+        } else if column >= self.name_start && column < self.name_end {
+            Some(AcmeTabBarHitTarget::Tab {
+                tab_id: self.tab_id,
+                position: self.position,
+            })
+        } else {
+            None
+        }
+    }
 }
 
-fn acme_tab_bar_style(active: bool) -> RcCharacterStyles {
-    acme_tab_bar_style_with_background(active, ACME_TAB_BAR_BACKGROUND)
+fn acme_tab_drag_delta(start: Position, current: Position) -> (usize, usize) {
+    let line_delta = if start.line() >= current.line() {
+        (start.line() - current.line()) as usize
+    } else {
+        (current.line() - start.line()) as usize
+    };
+    let column_delta = start.column().abs_diff(current.column());
+    (line_delta, column_delta)
+}
+
+fn acme_tab_drag_exceeded_threshold(start: Position, current: Position) -> bool {
+    let (line_delta, column_delta) = acme_tab_drag_delta(start, current);
+    line_delta > ACME_TAB_DRAG_THRESHOLD || column_delta > ACME_TAB_DRAG_THRESHOLD
+}
+
+fn acme_tab_bar_style(
+    active: bool,
+    input_mode: Option<InputMode>,
+) -> RcCharacterStyles {
+    let use_mode_colors = match input_mode {
+        Some(InputMode::Normal | InputMode::RenameTab | InputMode::RenamePane) | None => false,
+        Some(_) => true,
+    };
+    let (background, active_foreground, inactive_foreground) = if use_mode_colors {
+        (
+            ACME_MODE_TAB_BAR_BACKGROUND,
+            ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND,
+            ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND,
+        )
+    } else {
+        (
+            ACME_TAB_BAR_BACKGROUND,
+            ACME_ACTIVE_TAB_BAR_FOREGROUND,
+            ACME_INACTIVE_TAB_BAR_FOREGROUND,
+        )
+    };
+    acme_tab_bar_style_with_colors(
+        active,
+        background,
+        active_foreground,
+        inactive_foreground,
+    )
 }
 
 fn acme_tab_bar_active_rename_name_style() -> RcCharacterStyles {
-    acme_tab_bar_style_with_background(true, AnsiCode::Reset)
+    acme_tab_bar_style_with_colors(
+        true,
+        AnsiCode::Reset,
+        ACME_ACTIVE_TAB_BAR_FOREGROUND,
+        ACME_INACTIVE_TAB_BAR_FOREGROUND,
+    )
 }
 
-fn acme_tab_bar_style_with_background(active: bool, background: AnsiCode) -> RcCharacterStyles {
+fn acme_tab_bar_style_with_colors(
+    active: bool,
+    background: AnsiCode,
+    active_foreground: AnsiCode,
+    inactive_foreground: AnsiCode,
+) -> RcCharacterStyles {
     let mut styles = RcCharacterStyles::reset();
     styles.update(|styles| {
         styles.background = Some(background);
         styles.foreground = Some(if active {
-            ACME_ACTIVE_TAB_BAR_FOREGROUND
+            active_foreground
         } else {
-            ACME_INACTIVE_TAB_BAR_FOREGROUND
+            inactive_foreground
         });
         styles.underline = Some(AnsiCode::Underline(None));
         styles.bold = Some(if active {
@@ -1711,6 +1791,7 @@ pub(crate) struct Screen {
     visual_bell: bool,
     focus_follows_mouse: bool,
     mouse_click_through: bool,
+    acme_tab_drag: Option<AcmeTabDragState>,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     // the below are the configured values - the ones that will be set if and when the web server
     // is brought online
@@ -1985,6 +2066,7 @@ impl Screen {
             visual_bell,
             focus_follows_mouse,
             mouse_click_through,
+            acme_tab_drag: None,
             web_server_ip,
             web_server_port,
             render_blocker: RenderBlocker::new(100),
@@ -4431,6 +4513,7 @@ impl Screen {
             let name_end = (name_start + tab.name.width()).min(max_cols);
             segments.push(AcmeTabBarSegment {
                 square_hit_start,
+                square_start: x,
                 square_hit_end,
                 name_start,
                 name_end,
@@ -4458,6 +4541,20 @@ impl Screen {
             .find_map(|segment| segment.hit_target_at(column))
     }
 
+    fn acme_tab_bar_drag_hit_target(
+        &self,
+        position: Position,
+        max_cols: usize,
+    ) -> Option<AcmeTabBarHitTarget> {
+        if !self.acme_tab_bar_enabled() || position.line() != 0 {
+            return None;
+        }
+        let column = position.column();
+        self.acme_tab_bar_segments(max_cols, None)
+            .into_iter()
+            .find_map(|segment| segment.drag_target_at(column))
+    }
+
     fn render_acme_tab_bar(&self, output: &mut Output) -> Result<()> {
         if !self.acme_tab_bar_enabled() {
             return Ok(());
@@ -4472,9 +4569,8 @@ impl Screen {
                 continue;
             }
             let active_tab_id = self.active_tab_ids.get(&client_id).copied();
-            let active_tab_is_renaming =
-                self.get_client_input_mode(client_id) == Some(InputMode::RenameTab);
-            let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, active_tab_is_renaming);
+            let input_mode = self.get_client_input_mode(client_id);
+            let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, input_mode);
             output
                 .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
                 .with_context(err_context)?;
@@ -4496,9 +4592,8 @@ impl Screen {
             return Ok(());
         }
         let active_tab_id = self.active_tab_ids.get(&client_id).copied();
-        let active_tab_is_renaming =
-            self.get_client_input_mode(client_id) == Some(InputMode::RenameTab);
-        let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, active_tab_is_renaming);
+        let input_mode = self.get_client_input_mode(client_id);
+        let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, input_mode);
         output
             .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
             .with_context(err_context)
@@ -4508,11 +4603,12 @@ impl Screen {
         &self,
         cols: usize,
         active_tab_id: Option<usize>,
-        active_tab_is_renaming: bool,
+        input_mode: Option<InputMode>,
     ) -> CharacterChunk {
-        let normal_style = acme_tab_bar_style(false);
-        let active_style = acme_tab_bar_style(true);
+        let normal_style = acme_tab_bar_style(false, input_mode);
+        let active_style = acme_tab_bar_style(true, input_mode);
         let rename_style = acme_tab_bar_active_rename_name_style();
+        let active_tab_is_renaming = input_mode == Some(InputMode::RenameTab);
         let mut row = vec![];
         push_acme_tab_bar_spaces(&mut row, ACME_TAB_BAR_LEADING_SPACES, &normal_style, cols);
 
@@ -4548,6 +4644,9 @@ impl Screen {
         event: &MouseEvent,
         client_id: ClientId,
     ) -> Result<bool> {
+        if self.acme_tab_drag.is_some() {
+            return self.handle_acme_tab_drag_mouse_event(event, client_id);
+        }
         if event.event_type != MouseEventType::Press {
             return Ok(false);
         }
@@ -4566,12 +4665,67 @@ impl Screen {
                     return Ok(true);
                 }
                 self.handle_acme_tab_mouse_event(event, position, client_id)?;
+                if event.left && !event.ctrl && !event.alt {
+                    self.acme_tab_drag = Some(AcmeTabDragState {
+                        tab_id,
+                        start_position: event.position,
+                        start_tab_position: position,
+                        is_dragging: false,
+                    });
+                }
             },
             AcmeTabBarHitTarget::Tab { position, .. } => {
                 self.handle_acme_tab_mouse_event(event, position, client_id)?;
             },
         }
         Ok(true)
+    }
+
+    fn handle_acme_tab_drag_mouse_event(
+        &mut self,
+        event: &MouseEvent,
+        client_id: ClientId,
+    ) -> Result<bool> {
+        match event.event_type {
+            MouseEventType::Motion => self.continue_acme_tab_drag(event.position),
+            MouseEventType::Release => self.stop_acme_tab_drag(event.position, client_id)?,
+            MouseEventType::Press => {},
+        }
+        Ok(true)
+    }
+
+    fn continue_acme_tab_drag(&mut self, position: Position) {
+        if let Some(drag_state) = self.acme_tab_drag.as_mut() {
+            drag_state.is_dragging = drag_state.is_dragging
+                || acme_tab_drag_exceeded_threshold(drag_state.start_position, position);
+        }
+    }
+
+    /// Stop a tab square drag and reorder tabs when released over another tab target.
+    fn stop_acme_tab_drag(&mut self, position: Position, client_id: ClientId) -> Result<()> {
+        let Some(drag_state) = self.acme_tab_drag.take() else {
+            return Ok(());
+        };
+        let is_drag = drag_state.is_dragging
+            || acme_tab_drag_exceeded_threshold(drag_state.start_position, position);
+        if !is_drag {
+            return Ok(());
+        }
+
+        let max_cols = self.size_for_client(Some(client_id)).cols;
+        let Some(target) = self.acme_tab_bar_drag_hit_target(position, max_cols) else {
+            return Ok(());
+        };
+        let target_tab_id = match target {
+            AcmeTabBarHitTarget::TabSquare { tab_id, .. } => tab_id,
+            AcmeTabBarHitTarget::Tab { tab_id, .. } => tab_id,
+        };
+        if self.reorder_tab_by_id(drag_state.tab_id, drag_state.start_tab_position, target_tab_id) {
+            self.log_and_report_session_state()
+                .context("failed to report Acme tab reorder")?;
+            self.render(None).context("failed to render Acme tab reorder")?;
+        }
+        Ok(())
     }
 
     fn handle_acme_tab_mouse_event(
@@ -6349,6 +6503,59 @@ impl Screen {
 
         self.tabs.insert(active_tab_id, active_tab);
         self.tabs.insert(other_tab_id, other_tab);
+    }
+
+    /// Reorder a tab around the release target using the Acme pane drag side rule.
+    fn reorder_tab_by_id(
+        &mut self,
+        tab_id: usize,
+        start_tab_position: usize,
+        target_tab_id: usize,
+    ) -> bool {
+        if tab_id == target_tab_id || self.tabs.len() < 2 {
+            return false;
+        }
+
+        let Some(target_tab_position) = self.tabs.get(&target_tab_id).map(|tab| tab.position)
+        else {
+            return false;
+        };
+        let mut ordered_tab_ids: Vec<(usize, usize)> = self
+            .tabs
+            .values()
+            .map(|tab| (tab.position, tab.id))
+            .collect();
+        ordered_tab_ids.sort_by_key(|(position, _)| *position);
+        let original_order: Vec<usize> = ordered_tab_ids
+            .into_iter()
+            .map(|(_, tab_id)| tab_id)
+            .collect();
+
+        let mut new_order = original_order.clone();
+        let Some(moving_index) = new_order.iter().position(|id| *id == tab_id) else {
+            return false;
+        };
+        new_order.remove(moving_index);
+        let Some(target_index) = new_order.iter().position(|id| *id == target_tab_id) else {
+            return false;
+        };
+        let insert_index = if target_tab_position > start_tab_position {
+            target_index + 1
+        } else {
+            target_index
+        }
+        .min(new_order.len());
+        new_order.insert(insert_index, tab_id);
+
+        if new_order == original_order {
+            return false;
+        }
+        for (position, tab_id) in new_order.into_iter().enumerate() {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.position = position;
+            }
+        }
+        true
     }
 
     fn rotate_tab_positions_left(&mut self) {
