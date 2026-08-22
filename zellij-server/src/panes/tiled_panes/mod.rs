@@ -628,6 +628,17 @@ impl TiledPanes {
         self.align_panes_to_native_acme_viewport_if_needed();
         self.set_pane_frames(self.pane_frame_style);
     }
+
+    /// Change frame style and resize panes against the resulting viewport once.
+    pub fn resize_for_pane_frame_style(
+        &mut self,
+        new_screen_size: Size,
+        pane_frame_style: PaneFrameStyle,
+    ) {
+        self.pane_frame_style = pane_frame_style;
+        self.resize(new_screen_size);
+    }
+
     pub fn reapply_pane_frames(&mut self) {
         // same as set_pane_frames except it reapplies the current situation
         self.set_pane_frames(self.pane_frame_style);

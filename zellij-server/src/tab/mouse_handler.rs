@@ -777,6 +777,7 @@ impl MouseHandler {
             };
 
         let strategies = edge_and_delta_to_strategies(edge, delta_x, delta_y);
+        let is_acme_resize = acme_resize_snapshot.is_some();
 
         let changed = if is_floating {
             Self::resize_floating_pane_with_strategies(
@@ -815,6 +816,9 @@ impl MouseHandler {
 
         if changed {
             tab.set_force_render();
+            if is_acme_resize {
+                tab.set_should_clear_display_before_rendering();
+            }
         }
 
         Ok(changed)

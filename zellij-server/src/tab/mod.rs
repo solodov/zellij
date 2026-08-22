@@ -7131,15 +7131,16 @@ impl Tab {
             && column < viewport.x + viewport.cols)
     }
 
+    /// Apply a frame style and migrate tiled panes when its viewport reservation changes.
     pub fn set_pane_frames(&mut self, pane_frame_style: PaneFrameStyle) {
         let tab_bar_reservation_changed = native_acme_tab_bar_enabled(self.pane_frame_style)
             != native_acme_tab_bar_enabled(pane_frame_style);
-        self.tiled_panes.set_pane_frames(pane_frame_style);
         if tab_bar_reservation_changed {
             let display_area = *self.display_area.borrow();
-            *self.viewport.borrow_mut() =
-                native_acme_viewport_for_display_area(display_area, pane_frame_style);
-            self.tiled_panes.resize(display_area);
+            self.tiled_panes
+                .resize_for_pane_frame_style(display_area, pane_frame_style);
+        } else {
+            self.tiled_panes.set_pane_frames(pane_frame_style);
         }
         self.floating_panes.set_pane_frame_style(pane_frame_style);
         self.pane_frame_style = pane_frame_style;

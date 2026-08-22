@@ -216,10 +216,14 @@ impl Pane for TerminalPane {
         self.reflow_lines();
     }
     fn set_geom(&mut self, position_and_size: PaneGeom) {
+        let pane_size_changed = self.geom.cols.as_usize() != position_and_size.cols.as_usize()
+            || self.geom.rows.as_usize() != position_and_size.rows.as_usize();
         let is_pinned = self.geom.is_pinned;
         self.geom = position_and_size;
         self.geom.is_pinned = is_pinned;
-        self.reflow_lines();
+        if pane_size_changed {
+            self.reflow_lines();
+        }
         self.render_full_viewport();
     }
     fn set_geom_override(&mut self, pane_geom: PaneGeom) {
@@ -974,8 +978,10 @@ impl Pane for TerminalPane {
     }
 
     fn set_content_offset(&mut self, offset: Offset) {
-        self.content_offset = offset;
-        self.reflow_lines();
+        if self.content_offset != offset {
+            self.content_offset = offset;
+            self.reflow_lines();
+        }
     }
 
     fn get_content_offset(&self) -> Offset {
