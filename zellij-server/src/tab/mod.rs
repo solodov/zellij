@@ -5272,6 +5272,8 @@ impl Tab {
         if connected_clients.is_empty() || !self.tiled_panes.has_active_panes() {
             return Ok(());
         }
+        self.repair_native_acme_layout_if_needed()
+            .with_context(err_context)?;
         if self.stacked_pane_list_is_active() {
             self.groupify_all();
         }
@@ -5508,6 +5510,31 @@ impl Tab {
         }
         Ok(())
     }
+    /// Return whether panes that use the native Acme viewport are aligned to it.
+    #[cfg(test)]
+    pub fn native_acme_panes_fill_viewport(&self) -> bool {
+        self.tiled_panes.native_acme_panes_fill_viewport()
+    }
+
+    /// Set tab size metadata without relayout to exercise stale geometry repair paths.
+    #[cfg(test)]
+    pub(crate) fn set_size_without_resizing_for_test(&mut self, size: Size) {
+        self.size = size;
+        *self.display_area.borrow_mut() = size;
+        *self.viewport.borrow_mut() =
+            native_acme_viewport_for_display_area(size, self.pane_frame_style);
+    }
+
+    /// Repair stale native Acme geometry before rendering or resizing can fall back.
+    pub fn repair_native_acme_layout_if_needed(&mut self) -> Result<bool> {
+        if !self.tiled_panes.native_acme_panes_need_viewport_repair() {
+            return Ok(false);
+        }
+        self.resize_whole_tab(self.size)?;
+        self.set_force_render();
+        Ok(true)
+    }
+
     pub fn resize_whole_tab(&mut self, new_screen_size: Size) -> Result<()> {
         let err_context = || format!("failed to resize whole tab (id {})", self.id);
         self.size = new_screen_size;
@@ -5592,6 +5619,8 @@ impl Tab {
                 self.set_force_render(); // we force render here to make sure the panes under the floating pane render and don't leave "garbage" in case of a decrease
             }
         } else {
+            self.repair_native_acme_layout_if_needed()
+                .with_context(err_context)?;
             self.dissolve_stack_lists_for_classic_mutation();
             match self.tiled_panes.resize_active_pane(client_id, &strategy) {
                 Ok(_) => {

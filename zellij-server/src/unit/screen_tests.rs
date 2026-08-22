@@ -14,7 +14,7 @@ use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
-use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
+use zellij_utils::data::{Event, EventType, Resize, ResizeStrategy, Style, WebSharing};
 use zellij_utils::errors::{prelude::*, ErrorContext};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
@@ -11130,6 +11130,93 @@ fn applying_a_layout_to_an_existing_tab_keeps_its_viewer_derived_size() {
         client_size,
         "Applying a layout to an existing tab does not resize it away from its viewers"
     );
+}
+
+fn add_stale_native_acme_layout(screen: &mut Screen, client_id: ClientId, repaired_size: Size) {
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.new_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmeColumn,
+        Some(client_id),
+        None,
+    )
+    .expect("TEST");
+    tab.new_pane(
+        PaneId::Terminal(3),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::AcmePane,
+        Some(client_id),
+        None,
+    )
+    .expect("TEST");
+
+    tab.set_size_without_resizing_for_test(repaired_size);
+    assert!(
+        !tab.native_acme_panes_fill_viewport(),
+        "precondition: panes are still at the old geometry"
+    );
+}
+
+#[test]
+fn recompute_tab_size_repairs_stale_native_acme_viewport() {
+    let initial_size = Size { cols: 80, rows: 24 };
+    let repaired_size = Size { cols: 160, rows: 50 };
+    let client_id = 1;
+    let mut screen = create_new_screen(initial_size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
+    new_tab(&mut screen, 1, 0);
+    add_stale_native_acme_layout(&mut screen, client_id, repaired_size);
+
+    screen.set_client_size(client_id, repaired_size);
+    screen.recompute_tab_size(0).expect("TEST");
+
+    assert!(screen.tabs.get(&0).unwrap().native_acme_panes_fill_viewport());
+}
+
+#[test]
+fn render_repairs_stale_native_acme_viewport() {
+    let initial_size = Size { cols: 80, rows: 24 };
+    let repaired_size = Size { cols: 160, rows: 50 };
+    let client_id = 1;
+    let mut screen = create_new_screen(initial_size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
+    new_tab(&mut screen, 1, 0);
+    add_stale_native_acme_layout(&mut screen, client_id, repaired_size);
+
+    screen.set_client_size(client_id, repaired_size);
+    screen.render_to_clients().expect("TEST");
+
+    assert!(screen.tabs.get(&0).unwrap().native_acme_panes_fill_viewport());
+}
+
+#[test]
+fn resize_repairs_stale_native_acme_viewport_before_dispatching() {
+    let initial_size = Size { cols: 80, rows: 24 };
+    let repaired_size = Size { cols: 160, rows: 50 };
+    let client_id = 1;
+    let mut screen = create_new_screen(initial_size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
+    new_tab(&mut screen, 1, 0);
+    add_stale_native_acme_layout(&mut screen, client_id, repaired_size);
+    screen.set_client_size(client_id, repaired_size);
+
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id)
+        .expect("TEST");
+    tab.resize(
+        client_id,
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
+    )
+    .expect("TEST");
+
+    assert!(screen.tabs.get(&0).unwrap().native_acme_panes_fill_viewport());
 }
 
 #[test]

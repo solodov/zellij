@@ -2698,6 +2698,10 @@ impl Screen {
             if tab.size != new_size {
                 tab.resize_whole_tab(new_size).with_context(err_context)?;
                 tab.set_force_render();
+            } else {
+                // Native Acme can already know the new tab size while panes still hold stale geometry.
+                tab.repair_native_acme_layout_if_needed()
+                    .with_context(err_context)?;
             }
         }
         Ok(())

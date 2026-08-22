@@ -715,6 +715,10 @@ impl MouseHandler {
         let err_context = || format!("failed to start pane resize for pane {pane_id:?}");
 
         let is_floating = tab.floating_panes.panes_contain(&pane_id);
+        if !is_floating {
+            tab.repair_native_acme_layout_if_needed()
+                .with_context(err_context)?;
+        }
 
         let start_geom = if is_floating {
             tab.floating_panes

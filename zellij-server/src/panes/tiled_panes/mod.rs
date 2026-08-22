@@ -643,6 +643,62 @@ impl TiledPanes {
         // same as set_pane_frames except it reapplies the current situation
         self.set_pane_frames(self.pane_frame_style);
     }
+    /// Return whether native Acme panes currently cover the reserved viewport.
+    #[cfg(test)]
+    pub fn native_acme_panes_fill_viewport(&self) -> bool {
+        !native_acme_tab_bar_enabled(self.pane_frame_style) || self.acme_columns().is_ok()
+    }
+
+    /// Return whether visible native Acme panes have drifted from the reserved viewport.
+    pub fn native_acme_panes_need_viewport_repair(&self) -> bool {
+        if !native_acme_tab_bar_enabled(self.pane_frame_style)
+            || *self.fullscreen_covers_ui.borrow()
+        {
+            return false;
+        }
+        if self.acme_columns().is_ok()
+            && !self.native_acme_pane_extents_miss_viewport(true)
+        {
+            return false;
+        }
+        self.native_acme_pane_extents_miss_viewport(false)
+            || self.native_acme_pane_extents_miss_viewport(true)
+    }
+
+    fn native_acme_pane_extents_miss_viewport(&self, use_current_geom: bool) -> bool {
+        let viewport = *self.viewport.borrow();
+        let mut min_x = usize::MAX;
+        let mut min_y = usize::MAX;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut found_pane = false;
+
+        for (pane_id, pane) in &self.panes {
+            if self.panes_to_hide.contains(pane_id) || !pane.selectable() {
+                continue;
+            }
+            let geom = if use_current_geom {
+                pane.current_geom()
+            } else {
+                pane.position_and_size()
+            };
+            if geom.stacked.is_some() {
+                return false;
+            }
+            found_pane = true;
+            min_x = min_x.min(geom.x);
+            min_y = min_y.min(geom.y);
+            max_x = max_x.max(geom.x + geom.cols.as_usize());
+            max_y = max_y.max(geom.y + geom.rows.as_usize());
+        }
+
+        found_pane
+            && (min_x != viewport.x
+                || min_y != viewport.y
+                || max_x != viewport.x + viewport.cols
+                || max_y != viewport.y + viewport.rows)
+    }
+
     pub fn set_pane_frames(&mut self, pane_frame_style: PaneFrameStyle) {
         self.pane_frame_style = pane_frame_style;
         let draws_full_frames = pane_frame_style.draws_full_frames();
