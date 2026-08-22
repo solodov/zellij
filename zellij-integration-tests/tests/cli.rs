@@ -29,34 +29,25 @@ fn send_command_through_the_cli() {
     let mut zellij = start_zellij();
     claim_first_terminal_and_wait_for_prompt(&zellij);
 
-    zellij.run_suspended_command(&["suspended-command"]);
+    zellij.run_suspended_command(&["suspended-command", "two words", "quote's"]);
     let command_terminal = zellij.expect_pty_spawn();
     zellij.wait_until("suspended command pane waiting to run", |grid_snapshot| {
         grid_snapshot.contains("<Ctrl-c>")
     });
 
     zellij.send_stdin(&keys::ENTER);
+    command_terminal.wait_for_stdin("command fed to shell", |stdin| {
+        std::str::from_utf8(stdin)
+            .map(|stdin| stdin.contains("suspended-command 'two words' 'quote'\\''s'\n"))
+            .unwrap_or(false)
+    });
     zellij.wait_until("command running", |grid_snapshot| {
         !grid_snapshot.contains("<Ctrl-c>")
     });
     command_terminal.output(b"foo\r\n");
-    zellij.wait_until("first run printed foo", |grid_snapshot| {
-        grid_snapshot.contains("foo")
+    zellij.wait_until("shell-fed command printed foo", |grid_snapshot| {
+        grid_snapshot.contains("foo") && !grid_snapshot.contains("EXIT CODE")
     });
-    command_terminal.exit(Some(0));
-    zellij.wait_until("command pane held again after exit", |grid_snapshot| {
-        grid_snapshot.contains("EXIT CODE")
-    });
-
-    zellij.send_stdin(&keys::ENTER);
-    zellij.wait_until("command re-running", |grid_snapshot| {
-        !grid_snapshot.contains("EXIT CODE")
-    });
-    command_terminal.output(b"foo\r\nfoo\r\n");
-    let grid_snapshot = zellij.wait_until("command re-ran", |grid_snapshot| {
-        grid_snapshot.text.matches("foo").count() >= 2
-    });
-    assert_snapshot!(normalized(&grid_snapshot));
     zellij.quit();
 }
 

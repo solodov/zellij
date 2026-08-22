@@ -130,13 +130,19 @@ impl SharedPtys {
         })
     }
 
-    pub(crate) fn rerun(&self, terminal_id: u32, quit_cb: QuitCb) -> Box<dyn AsyncReader> {
+    pub(crate) fn rerun(
+        &self,
+        terminal_id: u32,
+        terminal_action: Option<TerminalAction>,
+        quit_cb: QuitCb,
+    ) -> Box<dyn AsyncReader> {
         let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel();
         self.mutate(|fake_pty_registry| {
             let fake_pty_state = fake_pty_registry
                 .fake_pty_states
                 .get_mut(&terminal_id)
                 .expect("re-run for unknown terminal id");
+            fake_pty_state.terminal_action = terminal_action;
             fake_pty_state.output_tx = Some(output_tx);
             fake_pty_state.quit_cb = Some(quit_cb);
             fake_pty_state.exited = false;

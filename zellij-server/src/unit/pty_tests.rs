@@ -206,6 +206,18 @@ fn collect_command_changed_events(
     events
 }
 
+#[cfg(not(windows))]
+#[test]
+fn shell_input_for_run_command_quotes_shell_arguments() {
+    let mut run_command = RunCommand::new(PathBuf::from("suspended-command"));
+    run_command.args = vec!["two words".into(), "quote's".into(), "".into()];
+
+    assert_eq!(
+        shell_input_for_run_command(&run_command),
+        b"suspended-command 'two words' 'quote'\\''s' ''\n"
+    );
+}
+
 #[test]
 fn foreground_command_emitted_with_is_foreground_true() {
     let mock = MockOsApi::new();

@@ -1627,7 +1627,12 @@ impl TerminalPane {
             self.grid.reset_terminal_state();
             self.set_should_render(true);
             self.remove_banner();
-            AdjustedInput::ReRunCommandInThisPane(run_command.clone())
+            if run_command.originating_plugin.is_some() {
+                // Plugin command panes keep direct rerun semantics for plugin lifecycle events.
+                AdjustedInput::ReRunCommandInThisPane(run_command.clone())
+            } else {
+                AdjustedInput::RunCommandInShellInThisPane(run_command.clone())
+            }
         })
     }
     fn handle_held_drop_to_shell(&mut self) -> Option<AdjustedInput> {

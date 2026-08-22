@@ -2,6 +2,7 @@ use crate::background_jobs::write_session_state_to_disk;
 use crate::background_jobs::BackgroundJob;
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
 use crate::os_input_output::{AsyncReader, NullAsyncReader};
+use crate::pty_writer::PtyWriteInstruction;
 use crate::route::NotificationEnd;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
@@ -92,6 +93,12 @@ pub enum PtyInstruction {
     ClosePane(PaneId, Option<NotificationEnd>),
     CloseTab(Vec<PaneId>),
     ReRunCommandInPane(PaneId, RunCommand, Option<NotificationEnd>),
+    RunCommandInShellInPane {
+        pane_id: PaneId,
+        shell: Option<PathBuf>,
+        command: RunCommand,
+        completion_tx: Option<NotificationEnd>,
+    },
     PlumbText {
         pane_id: PaneId,
         text: TextPlumbPayload,
@@ -177,6 +184,9 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::NewTab(..) => PtyContext::NewTab,
             PtyInstruction::OverrideLayout(..) => PtyContext::OverrideLayout,
             PtyInstruction::ReRunCommandInPane(..) => PtyContext::ReRunCommandInPane,
+            PtyInstruction::RunCommandInShellInPane { .. } => {
+                PtyContext::RunCommandInShellInPane
+            },
             PtyInstruction::PlumbText { .. } => PtyContext::PlumbText,
             PtyInstruction::DropToShellInPane { .. } => PtyContext::DropToShellInPane,
             PtyInstruction::SpawnInPlaceTerminal(..) => PtyContext::SpawnInPlaceTerminal,
@@ -633,6 +643,51 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                                     ))
                                     .with_context(err_context)?;
                             }
+                        },
+                        _ => Err::<(), _>(err).non_fatal(),
+                    },
+                }
+            },
+            PtyInstruction::RunCommandInShellInPane {
+                pane_id,
+                shell,
+                command,
+                completion_tx,
+            } => {
+                let err_context = || format!("failed to run command in shell for pane {:?}", pane_id);
+                // Run the user's shell as the foreground process so job control stays shell-owned.
+                let shell_command = RunCommand {
+                    command: shell.unwrap_or_else(|| get_default_shell()),
+                    hold_on_close: false,
+                    hold_on_start: false,
+                    cwd: command.cwd.clone(),
+                    ..Default::default()
+                };
+                let command_input = shell_input_for_run_command(&command);
+
+                match pty
+                    .rerun_command_in_pane(pane_id, shell_command.clone())
+                    .with_context(err_context)
+                {
+                    Ok(..) => {
+                        if let PaneId::Terminal(terminal_id) = pane_id {
+                            pty.bus
+                                .senders
+                                .send_to_pty_writer(PtyWriteInstruction::Write(
+                                    command_input,
+                                    terminal_id,
+                                    completion_tx,
+                                ))
+                                .with_context(err_context)?;
+                        }
+                    },
+                    Err(err) => match err.downcast_ref::<ZellijError>() {
+                        Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                            log::error!(
+                                "Failed to start shell {} in pane {}",
+                                shell_command.command.display(),
+                                terminal_id
+                            );
                         },
                         _ => Err::<(), _>(err).non_fatal(),
                     },
@@ -2449,6 +2504,56 @@ fn reap_text_plumber(mut process: Child) {
             log::error!("text-plumber failed: {}", e);
         }
     });
+}
+
+/// Build the input line used to run a serialized command inside an interactive shell.
+fn shell_input_for_run_command(run_command: &RunCommand) -> Vec<u8> {
+    let mut command_line = shell_command_line(run_command);
+    command_line.push('\n');
+    command_line.into_bytes()
+}
+
+/// Reconstruct a shell command line from the saved command path and argv.
+fn shell_command_line(run_command: &RunCommand) -> String {
+    std::iter::once(run_command.command.to_string_lossy().into_owned())
+        .chain(run_command.args.iter().cloned())
+        .map(|arg| shell_escape_arg(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Quote one argv item for POSIX-like shells while keeping simple words readable.
+#[cfg(not(windows))]
+fn shell_escape_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '%' | '+')
+            })
+    {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+/// Quote one argv item for Windows shells while keeping simple words readable.
+#[cfg(windows)]
+fn shell_escape_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| {
+                !c.is_ascii_whitespace()
+                    && !matches!(c, '"' | '^' | '&' | '|' | '<' | '>' | '(' | ')' | '%' | '!')
+            })
+    {
+        arg.to_owned()
+    } else {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    }
 }
 
 fn send_command_not_found_to_screen(

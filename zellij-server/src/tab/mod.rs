@@ -856,6 +856,7 @@ pub enum GuestChoiceIndicator {
 pub enum AdjustedInput {
     WriteBytesToTerminal(Vec<u8>),
     ReRunCommandInThisPane(RunCommand),
+    RunCommandInShellInThisPane(RunCommand),
     PermissionRequestResult(Vec<PermissionType>, PermissionStatus),
     CloseThisPane,
     DropToShellInThisPane { working_dir: Option<PathBuf> },
@@ -4697,6 +4698,18 @@ impl Tab {
                                 command,
                                 completion_tx,
                             ))
+                            .with_context(err_context)?;
+                        should_update_ui = true;
+                    },
+                    Some(AdjustedInput::RunCommandInShellInThisPane(command)) => {
+                        self.pids_waiting_resize.insert(active_terminal_id);
+                        self.senders
+                            .send_to_pty(PtyInstruction::RunCommandInShellInPane {
+                                pane_id: PaneId::Terminal(active_terminal_id),
+                                shell: Some(self.default_shell.clone()),
+                                command,
+                                completion_tx,
+                            })
                             .with_context(err_context)?;
                         should_update_ui = true;
                     },
