@@ -1144,6 +1144,28 @@ fn acme_tab_square_click_without_drag_still_switches_tabs() {
 }
 
 #[test]
+fn ctrl_right_click_acme_tab_square_requests_new_tab() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B"]);
+    let (to_screen, screen_receiver): ChannelWithContext<ScreenInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_screen = Some(SenderWithContext::new(to_screen));
+    let segments = screen.acme_tab_bar_segments(size.cols, None);
+    let mut event =
+        MouseEvent::new_right_press_event(position_on_tab_bar(segments[0].square_start));
+    event.ctrl = true;
+
+    assert!(screen
+        .handle_acme_tab_bar_mouse_event(&event, client_id)
+        .unwrap());
+    assert!(matches!(
+        screen_receiver.try_recv().unwrap().0,
+        ScreenInstruction::NewTab(..)
+    ));
+}
+
+#[test]
 fn acme_tab_bar_inactive_style_uses_muted_foreground() {
     let active_style = acme_tab_bar_style(true, Some(InputMode::Normal));
     let inactive_style = acme_tab_bar_style(false, Some(InputMode::Normal));

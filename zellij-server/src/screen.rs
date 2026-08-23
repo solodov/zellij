@@ -4660,7 +4660,8 @@ impl Screen {
         };
         match target {
             AcmeTabBarHitTarget::TabSquare { tab_id, position } => {
-                if event.ctrl && event.left {
+                // Ctrl-right creates the next tab, matching rightward Acme column creation.
+                if event.ctrl && event.right {
                     self.request_new_acme_tab(client_id)?;
                     return Ok(true);
                 }
