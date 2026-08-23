@@ -615,7 +615,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 let err_context = || format!("failed to rerun command in pane {:?}", pane_id);
 
                 match pty
-                    .rerun_command_in_pane(pane_id, run_command.clone())
+                    .rerun_command_in_pane(pane_id, run_command.clone(), None)
                     .with_context(err_context)
                 {
                     Ok(..) => {},
@@ -666,21 +666,14 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 let command_input = shell_input_for_run_command(&command);
 
                 match pty
-                    .rerun_command_in_pane(pane_id, shell_command.clone())
+                    .rerun_command_in_pane(
+                        pane_id,
+                        shell_command.clone(),
+                        Some((command_input, completion_tx)),
+                    )
                     .with_context(err_context)
                 {
-                    Ok(..) => {
-                        if let PaneId::Terminal(terminal_id) = pane_id {
-                            pty.bus
-                                .senders
-                                .send_to_pty_writer(PtyWriteInstruction::Write(
-                                    command_input,
-                                    terminal_id,
-                                    completion_tx,
-                                ))
-                                .with_context(err_context)?;
-                        }
-                    },
+                    Ok(..) => {},
                     Err(err) => match err.downcast_ref::<ZellijError>() {
                         Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
                             log::error!(
@@ -715,7 +708,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     ..Default::default()
                 };
                 match pty
-                    .rerun_command_in_pane(pane_id, run_command.clone())
+                    .rerun_command_in_pane(pane_id, run_command.clone(), None)
                     .with_context(err_context)
                 {
                     Ok(..) => {},
@@ -1204,11 +1197,18 @@ impl Pty {
             let debug_to_file = self.debug_to_file;
             let activity_flag = activity_flag.clone();
             async move {
-                TerminalBytes::new(terminal_id, reader, senders, debug_to_file, activity_flag)
-                    .listen()
-                    .await
-                    .with_context(|| err_context(terminal_id))
-                    .fatal();
+                TerminalBytes::new(
+                    terminal_id,
+                    reader,
+                    senders,
+                    debug_to_file,
+                    activity_flag,
+                    None,
+                )
+                .listen()
+                .await
+                .with_context(|| err_context(terminal_id))
+                .fatal();
             }
         });
 
@@ -1412,6 +1412,7 @@ impl Pty {
                                 senders,
                                 debug_to_file,
                                 activity_flag,
+                                None,
                             )
                             .listen()
                             .await
@@ -1590,6 +1591,7 @@ impl Pty {
                                 senders,
                                 debug_to_file,
                                 activity_flag,
+                                None,
                             )
                             .listen()
                             .await
@@ -1911,10 +1913,12 @@ impl Pty {
             self.active_panes.insert(client_id, pane_id);
         }
     }
+    /// Re-run a terminal command and optionally queue input for the new process startup.
     pub fn rerun_command_in_pane(
         &mut self,
         pane_id: PaneId,
         mut run_command: RunCommand,
+        write_after_initial_output_settles: Option<(Vec<u8>, Option<NotificationEnd>)>,
     ) -> Result<()> {
         let err_context = || format!("failed to rerun command in pane {:?}", pane_id);
 
@@ -1971,6 +1975,9 @@ impl Pty {
                     })
                     .with_context(err_context)?;
                 let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let write_after_initial_output_settles = write_after_initial_output_settles.map(
+                    |(bytes, completion_tx)| PtyWriteInstruction::Write(bytes, id, completion_tx),
+                );
                 let terminal_bytes = async_runtime().spawn({
                     let err_context =
                         |pane_id| format!("failed to run async task for pane {pane_id:?}");
@@ -1978,11 +1985,18 @@ impl Pty {
                     let debug_to_file = self.debug_to_file;
                     let activity_flag = activity_flag.clone();
                     async move {
-                        TerminalBytes::new(id, reader, senders, debug_to_file, activity_flag)
-                            .listen()
-                            .await
-                            .with_context(|| err_context(pane_id))
-                            .fatal();
+                        TerminalBytes::new(
+                            id,
+                            reader,
+                            senders,
+                            debug_to_file,
+                            activity_flag,
+                            write_after_initial_output_settles,
+                        )
+                        .listen()
+                        .await
+                        .with_context(|| err_context(pane_id))
+                        .fatal();
                     }
                 });
 

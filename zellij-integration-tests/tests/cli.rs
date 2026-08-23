@@ -36,10 +36,19 @@ fn send_command_through_the_cli() {
     });
 
     zellij.send_stdin(&keys::ENTER);
+    command_terminal.output(PROMPT);
+    let command_line = "suspended-command 'two words' 'quote'\\''s'";
     command_terminal.wait_for_stdin("command fed to shell", |stdin| {
         std::str::from_utf8(stdin)
-            .map(|stdin| stdin.contains("suspended-command 'two words' 'quote'\\''s'\n"))
+            .map(|stdin| stdin.contains(&format!("{command_line}\n")))
             .unwrap_or(false)
+    });
+    zellij.wait_until("command echoed at shell prompt", |grid_snapshot| {
+        grid_snapshot.contains(&format!("$ {command_line}"))
+            && !grid_snapshot
+                .text
+                .lines()
+                .any(|line| line.starts_with(command_line))
     });
     zellij.wait_until("command running", |grid_snapshot| {
         !grid_snapshot.contains("<Ctrl-c>")
