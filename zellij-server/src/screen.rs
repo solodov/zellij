@@ -1792,6 +1792,7 @@ pub(crate) struct Screen {
     focus_follows_mouse: bool,
     mouse_click_through: bool,
     acme_tab_drag: Option<AcmeTabDragState>,
+    tab_id_being_renamed: BTreeMap<ClientId, usize>,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     // the below are the configured values - the ones that will be set if and when the web server
     // is brought online
@@ -2067,6 +2068,7 @@ impl Screen {
             focus_follows_mouse,
             mouse_click_through,
             acme_tab_drag: None,
+            tab_id_being_renamed: BTreeMap::new(),
             web_server_ip,
             web_server_port,
             render_blocker: RenderBlocker::new(100),
@@ -4574,7 +4576,13 @@ impl Screen {
             }
             let active_tab_id = self.active_tab_ids.get(&client_id).copied();
             let input_mode = self.get_client_input_mode(client_id);
-            let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, input_mode);
+            let tab_id_being_renamed = self.tab_id_being_renamed.get(&client_id).copied();
+            let chunk = self.acme_tab_bar_chunk(
+                size.cols,
+                active_tab_id,
+                tab_id_being_renamed,
+                input_mode,
+            );
             output
                 .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
                 .with_context(err_context)?;
@@ -4597,7 +4605,13 @@ impl Screen {
         }
         let active_tab_id = self.active_tab_ids.get(&client_id).copied();
         let input_mode = self.get_client_input_mode(client_id);
-        let chunk = self.acme_tab_bar_chunk(size.cols, active_tab_id, input_mode);
+        let tab_id_being_renamed = self.tab_id_being_renamed.get(&client_id).copied();
+        let chunk = self.acme_tab_bar_chunk(
+            size.cols,
+            active_tab_id,
+            tab_id_being_renamed,
+            input_mode,
+        );
         output
             .add_character_chunks_to_client(client_id, vec![chunk], Some(ACME_TAB_BAR_Z_INDEX))
             .with_context(err_context)
@@ -4607,12 +4621,15 @@ impl Screen {
         &self,
         cols: usize,
         active_tab_id: Option<usize>,
+        tab_id_being_renamed: Option<usize>,
         input_mode: Option<InputMode>,
     ) -> CharacterChunk {
         let normal_style = acme_tab_bar_style(false, input_mode);
         let active_style = acme_tab_bar_style(true, input_mode);
         let rename_style = acme_tab_bar_active_rename_name_style();
-        let active_tab_is_renaming = input_mode == Some(InputMode::RenameTab);
+        let tab_id_being_renamed = (input_mode == Some(InputMode::RenameTab))
+            .then_some(tab_id_being_renamed.or(active_tab_id))
+            .flatten();
         let mut row = vec![];
         push_acme_tab_bar_spaces(&mut row, ACME_TAB_BAR_LEADING_SPACES, &normal_style, cols);
 
@@ -4627,7 +4644,7 @@ impl Screen {
             } else {
                 &normal_style
             };
-            let name_style = if segment.active && active_tab_is_renaming {
+            let name_style = if Some(segment.tab_id) == tab_id_being_renamed {
                 &rename_style
             } else {
                 style
@@ -4669,7 +4686,7 @@ impl Screen {
                     self.close_tab_by_id(tab_id)?;
                     return Ok(true);
                 }
-                self.handle_acme_tab_mouse_event(event, position, client_id)?;
+                self.handle_acme_tab_mouse_event(event, tab_id, position, client_id)?;
                 if event.left && !event.ctrl && !event.alt {
                     self.acme_tab_drag = Some(AcmeTabDragState {
                         tab_id,
@@ -4679,8 +4696,8 @@ impl Screen {
                     });
                 }
             },
-            AcmeTabBarHitTarget::Tab { position, .. } => {
-                self.handle_acme_tab_mouse_event(event, position, client_id)?;
+            AcmeTabBarHitTarget::Tab { tab_id, position } => {
+                self.handle_acme_tab_mouse_event(event, tab_id, position, client_id)?;
             },
         }
         Ok(true)
@@ -4736,11 +4753,12 @@ impl Screen {
     fn handle_acme_tab_mouse_event(
         &mut self,
         event: &MouseEvent,
+        tab_id: usize,
         position: usize,
         client_id: ClientId,
     ) -> Result<()> {
         if event.ctrl && event.left {
-            self.switch_active_tab(position, None, true, client_id)?;
+            self.start_renaming_tab(tab_id, client_id);
             self.bus
                 .senders
                 .send_to_server(ServerInstruction::ChangeMode(
@@ -6351,73 +6369,90 @@ impl Screen {
         self.cached_layout_errors = errors;
     }
 
+    fn start_renaming_tab(&mut self, tab_id: usize, client_id: ClientId) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.prev_name = tab.name.clone();
+            self.tab_id_being_renamed.insert(client_id, tab_id);
+        }
+    }
+
+    fn ensure_tab_rename_target(&mut self, client_id: ClientId) {
+        let target_exists = self
+            .tab_id_being_renamed
+            .get(&client_id)
+            .and_then(|tab_id| self.tabs.get(tab_id))
+            .is_some();
+        if target_exists {
+            return;
+        }
+        if let Some(active_tab_id) = self.active_tab_ids.get(&client_id).copied() {
+            self.start_renaming_tab(active_tab_id, client_id);
+        }
+    }
+
+    fn clear_tab_rename_target(&mut self, client_id: ClientId) {
+        self.tab_id_being_renamed.remove(&client_id);
+    }
+
+    fn tab_id_to_rename(&self, client_id: ClientId) -> Option<usize> {
+        let client_id = if self.get_active_tab(client_id).is_ok() {
+            Some(client_id)
+        } else {
+            self.get_first_client_id()
+        }?;
+        self.tab_id_being_renamed
+            .get(&client_id)
+            .copied()
+            .or_else(|| self.active_tab_ids.get(&client_id).copied())
+    }
+
+    /// Updates the tab currently being renamed, defaulting to the active tab.
     pub fn update_active_tab_name(&mut self, buf: Vec<u8>, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to update active tabs name for client id: {client_id:?}");
-
-        let client_id = if self.get_active_tab(client_id).is_ok() {
-            Some(client_id)
-        } else {
-            self.get_first_client_id()
+        let Some(tab_id) = self.tab_id_to_rename(client_id) else {
+            return Ok(());
         };
-
-        match client_id {
-            Some(client_id) => {
-                let s = str::from_utf8(&buf)
-                    .with_context(|| format!("failed to construct tab name from buf: {buf:?}"))
-                    .with_context(err_context)?;
-                match self.get_active_tab_mut(client_id) {
-                    Ok(active_tab) => {
-                        match s {
-                            "\0" => {
-                                active_tab.name = String::new();
-                            },
-                            "\u{007F}" | "\u{0008}" => {
-                                // delete and backspace keys
-                                active_tab.name.pop();
-                            },
-                            c => {
-                                active_tab
-                                    .name
-                                    .push_str(&clean_string_from_control_and_linebreak(c));
-                            },
-                        }
-                        self.log_and_report_session_state()
-                            .with_context(err_context)
-                    },
-                    Err(err) => {
-                        Err::<(), _>(err).with_context(err_context).non_fatal();
-                        Ok(())
-                    },
-                }
+        let s = str::from_utf8(&buf)
+            .with_context(|| format!("failed to construct tab name from buf: {buf:?}"))
+            .with_context(err_context)?;
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return Ok(());
+        };
+        match s {
+            "\0" => {
+                tab.name = String::new();
             },
-            None => Ok(()),
+            "\u{007F}" | "\u{0008}" => {
+                // delete and backspace keys
+                tab.name.pop();
+            },
+            c => {
+                tab.name
+                    .push_str(&clean_string_from_control_and_linebreak(c));
+            },
         }
+        self.log_and_report_session_state()
+            .with_context(err_context)
     }
-    pub fn undo_active_rename_tab(&mut self, client_id: ClientId) -> Result<()> {
-        let err_context = || format!("failed to undo active tab rename for client {}", client_id);
 
-        let client_id = if self.get_active_tab(client_id).is_ok() {
-            Some(client_id)
-        } else {
-            self.get_first_client_id()
+    /// Restores the previous name for the tab currently being renamed.
+    pub fn undo_active_rename_tab(&mut self, client_id: ClientId) -> Result<()> {
+        let Some(tab_id) = self.tab_id_to_rename(client_id) else {
+            return Ok(());
         };
-        match client_id {
-            Some(client_id) => {
-                match self.get_active_tab_mut(client_id) {
-                    Ok(active_tab) => {
-                        if active_tab.name != active_tab.prev_name {
-                            active_tab.name = active_tab.prev_name.clone();
-                            self.log_and_report_session_state()
-                                .context("failed to undo renaming of active tab")?;
-                        }
-                    },
-                    Err(err) => Err::<(), _>(err).with_context(err_context).non_fatal(),
-                };
-                Ok(())
-            },
-            None => Ok(()),
+        let mut renamed = false;
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            if tab.name != tab.prev_name {
+                tab.name = tab.prev_name.clone();
+                renamed = true;
+            }
         }
+        if renamed {
+            self.log_and_report_session_state()
+                .context("failed to undo renaming of tab")?;
+        }
+        Ok(())
     }
 
     pub fn move_active_tab_to_left(&mut self, client_id: ClientId) -> Result<()> {
@@ -6664,10 +6699,12 @@ impl Screen {
             active_tab!(self, client_id, |tab: &mut Tab| tab.clear_search(client_id));
         }
 
+        if previous_mode == InputMode::RenameTab && mode_info.mode != InputMode::RenameTab {
+            self.clear_tab_rename_target(client_id);
+        }
+
         if mode_info.mode == InputMode::RenameTab {
-            if let Ok(active_tab) = self.get_active_tab_mut(client_id) {
-                active_tab.prev_name = active_tab.name.clone();
-            }
+            self.ensure_tab_rename_target(client_id);
         }
 
         if mode_info.mode == InputMode::RenamePane {

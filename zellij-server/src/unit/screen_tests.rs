@@ -1166,6 +1166,62 @@ fn ctrl_right_click_acme_tab_square_requests_new_tab() {
 }
 
 #[test]
+fn ctrl_left_click_acme_tab_starts_renaming_without_switching_tabs() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C"]);
+    screen.go_to_tab(1, client_id).unwrap();
+    let active_tab_before = screen.active_tab_ids.get(&client_id).copied();
+    let segments = screen.acme_tab_bar_segments(size.cols, active_tab_before);
+    let target_tab_id = segments[1].tab_id;
+    let mut event = MouseEvent::new_left_press_event(position_on_tab_bar(segments[1].name_start));
+    event.ctrl = true;
+
+    assert!(screen
+        .handle_acme_tab_bar_mouse_event(&event, client_id)
+        .unwrap());
+
+    assert_eq!(screen.active_tab_ids.get(&client_id).copied(), active_tab_before);
+    assert_eq!(
+        screen.tab_id_being_renamed.get(&client_id).copied(),
+        Some(target_tab_id)
+    );
+}
+
+#[test]
+fn inactive_acme_tab_rename_input_updates_target_without_switching() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C"]);
+    screen.go_to_tab(1, client_id).unwrap();
+    let active_tab_before = screen.active_tab_ids.get(&client_id).copied();
+    let segments = screen.acme_tab_bar_segments(size.cols, active_tab_before);
+    let target_tab_id = segments[1].tab_id;
+    let mut event = MouseEvent::new_left_press_event(position_on_tab_bar(segments[1].name_start));
+    event.ctrl = true;
+    screen
+        .handle_acme_tab_bar_mouse_event(&event, client_id)
+        .unwrap();
+    screen
+        .change_mode(InputMode::RenameTab, None, client_id)
+        .unwrap();
+
+    screen
+        .update_active_tab_name(b"\0".to_vec(), client_id)
+        .unwrap();
+    screen
+        .update_active_tab_name(b"Renamed".to_vec(), client_id)
+        .unwrap();
+
+    assert_eq!(screen.active_tab_ids.get(&client_id).copied(), active_tab_before);
+    assert_eq!(screen.tabs.get(&target_tab_id).unwrap().name, "Renamed");
+    assert_eq!(screen.tabs.get(&active_tab_before.unwrap()).unwrap().name, "A");
+
+    screen.undo_active_rename_tab(client_id).unwrap();
+    assert_eq!(screen.tabs.get(&target_tab_id).unwrap().name, "B");
+}
+
+#[test]
 fn acme_tab_bar_inactive_style_uses_muted_foreground() {
     let active_style = acme_tab_bar_style(true, Some(InputMode::Normal));
     let inactive_style = acme_tab_bar_style(false, Some(InputMode::Normal));
