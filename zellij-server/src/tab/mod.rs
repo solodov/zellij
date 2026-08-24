@@ -6942,14 +6942,30 @@ impl Tab {
         let acme_title_pane_id = self.tiled_panes.acme_title_pane_id_at_position(point);
         let found_pane_id = if let Some(pane_id) = acme_title_pane_id {
             Some(pane_id)
-        } else if search_selectable {
-            self.get_selectable_tiled_panes()
-                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
-                .map(|(&id, _)| id)
         } else {
-            self.get_tiled_panes()
-                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
-                .map(|(&id, _)| id)
+            // Tiled panes can temporarily overlap after resize failures; skip hidden panes
+            // and use the last match because tiled rendering draws panes in this order.
+            let mut found_pane_id = None;
+            if search_selectable {
+                for (&id, pane) in self.get_selectable_tiled_panes() {
+                    if self.tiled_panes.panes_to_hide_contains(id) {
+                        continue;
+                    }
+                    if pane_contains_point(pane, point, &stacked_pane_ids_under_flexible_pane) {
+                        found_pane_id = Some(id);
+                    }
+                }
+            } else {
+                for (&id, pane) in self.get_tiled_panes() {
+                    if self.tiled_panes.panes_to_hide_contains(id) {
+                        continue;
+                    }
+                    if pane_contains_point(pane, point, &stacked_pane_ids_under_flexible_pane) {
+                        found_pane_id = Some(id);
+                    }
+                }
+            }
+            found_pane_id
         };
         let resolved_pane_id = found_pane_id.map(|id| self.stack_list_member_at_point(id, point));
         if search_selectable {

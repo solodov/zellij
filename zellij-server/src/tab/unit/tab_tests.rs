@@ -15,7 +15,7 @@ use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::layout::{SplitDirection, SplitSize, TiledPaneLayout};
 use zellij_utils::input::options::PaneFrameStyle;
 use zellij_utils::ipc::IpcReceiverWithContext;
-use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
+use zellij_utils::pane_size::{Dimension, PaneGeom, Size, SizeInPixels};
 
 use crate::os_input_output::AsyncReader;
 use std::cell::RefCell;
@@ -249,6 +249,49 @@ fn create_new_tab_with_plugin_receiver(
     )
     .unwrap();
     (tab, plugin_receiver)
+}
+
+#[test]
+fn tiled_pane_hit_testing_prefers_last_rendered_overlapping_pane() {
+    let mut tab = create_new_tab(Size { cols: 80, rows: 20 }, true);
+    tab.new_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+        Some(1),
+        None,
+    )
+    .unwrap();
+    let overlapping_geom = PaneGeom {
+        x: 0,
+        y: 0,
+        rows: Dimension::fixed(20),
+        cols: Dimension::fixed(80),
+        ..Default::default()
+    };
+    tab.tiled_panes
+        .set_geom_for_pane_with_id(&PaneId::Terminal(1), overlapping_geom);
+    tab.tiled_panes
+        .set_geom_for_pane_with_id(&PaneId::Terminal(2), overlapping_geom);
+
+    assert_eq!(
+        tab.get_pane_id_at(&zellij_utils::position::Position::new(5, 10), false)
+            .unwrap(),
+        Some(PaneId::Terminal(2))
+    );
+
+    tab.tiled_panes.add_to_hidden_panels(PaneId::Terminal(2));
+    assert_eq!(
+        tab.get_pane_id_at(&zellij_utils::position::Position::new(5, 10), false)
+            .unwrap(),
+        Some(PaneId::Terminal(1))
+    );
 }
 
 fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
