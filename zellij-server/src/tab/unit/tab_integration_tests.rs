@@ -16550,6 +16550,44 @@ fn acme_mouse_resize_clears_cells_from_the_previous_geometry() {
 }
 
 #[test]
+fn dragging_acme_vertical_border_resizes_whole_columns() {
+    let size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+
+    for (pane_id, placement) in [
+        (PaneId::Terminal(2), NewPanePlacement::AcmePane),
+        (PaneId::Terminal(3), NewPanePlacement::AcmeColumn),
+        (PaneId::Terminal(4), NewPanePlacement::AcmePane),
+    ] {
+        tab.new_pane(pane_id, None, None, false, true, placement, Some(client_id), None)
+            .unwrap();
+    }
+
+    let before = pane_geometries(&tab);
+    let left_lower_geom = before[&PaneId::Terminal(2)];
+    let drag_start = Position::new(
+        (left_lower_geom.y + 2) as i32,
+        (left_lower_geom.x + left_lower_geom.cols.as_usize() - 1) as u16,
+    );
+    let drag_end = Position::new(drag_start.line() as i32, (drag_start.column() + 8) as u16);
+
+    left_drag(&mut tab, drag_start, drag_end, client_id);
+
+    let geoms = pane_geometries(&tab);
+    assert!(geoms[&PaneId::Terminal(1)].cols.as_usize() > before[&PaneId::Terminal(1)].cols.as_usize());
+    assert_eq!(geoms[&PaneId::Terminal(1)].x, geoms[&PaneId::Terminal(2)].x);
+    assert_eq!(geoms[&PaneId::Terminal(1)].cols, geoms[&PaneId::Terminal(2)].cols);
+    assert_eq!(geoms[&PaneId::Terminal(3)].x, geoms[&PaneId::Terminal(4)].x);
+    assert_eq!(geoms[&PaneId::Terminal(3)].cols, geoms[&PaneId::Terminal(4)].cols);
+    assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
 fn acme_column_and_pane_actions_preserve_top_level_columns() {
     let size = Size {
         cols: 120,

@@ -2583,6 +2583,11 @@ impl TiledPanes {
         resize_percent: Option<(f64, f64)>,
     ) -> Result<bool> {
         let err_context = || format!("failed to resize pand with id: {:?}", pane_id);
+        let change_by = resize_percent.unwrap_or((RESIZE_PERCENT, RESIZE_PERCENT));
+
+        if let Some(changed) = self.resize_acme_pane_with_strategies(pane_id, &[strategy], change_by)? {
+            return Ok(changed);
+        }
 
         let mut pane_grid = TiledPaneGrid::new(
             &mut self.panes,
@@ -2596,7 +2601,7 @@ impl TiledPanes {
             .change_pane_size(
                 &pane_id,
                 &strategy,
-                resize_percent.unwrap_or((RESIZE_PERCENT, RESIZE_PERCENT)),
+                change_by,
             )
             .with_context(err_context)
         {
@@ -2713,36 +2718,38 @@ impl TiledPanes {
         Ok(changed)
     }
 
-    /// Resize an Acme pane vertically while preserving one-row collapsed titles.
+    /// Resize an Acme pane while preserving full-height column geometry.
     fn resize_acme_pane_with_strategies(
         &mut self,
         pane_id: PaneId,
         strategies: &[ResizeStrategy],
         change_by: (f64, f64),
-    ) -> Result<bool> {
-        let vertical_strategies: Vec<&ResizeStrategy> = strategies
+    ) -> Result<Option<bool>> {
+        let acme_strategies: Vec<&ResizeStrategy> = strategies
             .iter()
-            .filter(|strategy| matches!(strategy.direction, Some(Direction::Up | Direction::Down)))
+            .filter(|strategy| {
+                matches!(
+                    strategy.direction,
+                    Some(Direction::Up | Direction::Down | Direction::Left | Direction::Right)
+                )
+            })
             .collect();
-        if vertical_strategies.is_empty() {
-            return Ok(false);
+        if acme_strategies.is_empty() {
+            return Ok(None);
         }
 
         let viewport = *self.viewport.borrow();
         let row_delta = resize_percent_to_cells(change_by.1, viewport.rows);
-        if row_delta == 0 {
-            return Ok(false);
-        }
-
+        let col_delta = resize_percent_to_cells(change_by.0, viewport.cols);
         let mut columns = match self.acme_columns() {
             Ok(columns) => columns,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         };
         let Some(column_index) = columns
             .iter()
             .position(|column| column.contains_pane(pane_id))
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let pane_index = columns[column_index]
             .pane_geometries
@@ -2751,17 +2758,31 @@ impl TiledPanes {
             .ok_or_else(|| anyhow!("Pane is not in an Acme column"))?;
 
         let mut changed = false;
-        for strategy in vertical_strategies {
-            changed |= resize_acme_column_pane(
-                &mut columns[column_index],
-                pane_index,
-                strategy,
-                row_delta,
-                viewport,
-            )?;
+        for strategy in acme_strategies {
+            match strategy.direction {
+                Some(Direction::Up | Direction::Down) if row_delta > 0 => {
+                    changed |= resize_acme_column_pane(
+                        &mut columns[column_index],
+                        pane_index,
+                        strategy,
+                        row_delta,
+                        viewport,
+                    )?;
+                },
+                Some(Direction::Left | Direction::Right) if col_delta > 0 => {
+                    changed |= resize_acme_column_width(
+                        &mut columns,
+                        column_index,
+                        strategy,
+                        col_delta,
+                        viewport,
+                    )?;
+                },
+                _ => {},
+            }
         }
         if changed {
-            for pane_geometry in &columns[column_index].pane_geometries {
+            for pane_geometry in columns.iter().flat_map(|column| &column.pane_geometries) {
                 let pane = self
                     .panes
                     .get_mut(&pane_geometry.pane_id)
@@ -2772,7 +2793,7 @@ impl TiledPanes {
             self.reapply_pane_frames();
             self.set_force_render();
         }
-        Ok(true)
+        Ok(Some(changed))
     }
 
     pub fn resize_pane_with_strategies(
@@ -2783,7 +2804,10 @@ impl TiledPanes {
     ) -> Result<()> {
         let err_context = || format!("failed to resize pane {:?} with strategies", pane_id);
 
-        if self.resize_acme_pane_with_strategies(pane_id, strategies, change_by)? {
+        if self
+            .resize_acme_pane_with_strategies(pane_id, strategies, change_by)?
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -4265,6 +4289,60 @@ fn resize_percent_to_cells(percent: f64, full_size: usize) -> usize {
     } else {
         (((percent / 100.0) * full_size as f64).round() as usize).max(1)
     }
+}
+
+fn resize_acme_column_width(
+    columns: &mut [AcmeColumn],
+    column_index: usize,
+    strategy: &ResizeStrategy,
+    col_delta: usize,
+    viewport: Viewport,
+) -> Result<bool> {
+    let column_count = columns.len();
+    let resize_pair = match (strategy.resize, strategy.direction) {
+        (Resize::Increase, Some(Direction::Right)) if column_index + 1 < column_count => {
+            Some((column_index + 1, column_index))
+        },
+        (Resize::Decrease, Some(Direction::Right)) if column_index + 1 < column_count => {
+            Some((column_index, column_index + 1))
+        },
+        (Resize::Increase, Some(Direction::Left)) => column_index
+            .checked_sub(1)
+            .map(|donor_index| (donor_index, column_index)),
+        (Resize::Decrease, Some(Direction::Left)) => column_index
+            .checked_sub(1)
+            .map(|recipient_index| (column_index, recipient_index)),
+        _ => None,
+    };
+    let Some((donor_index, recipient_index)) = resize_pair else {
+        return Ok(false);
+    };
+
+    let width_delta = col_delta.min(columns[donor_index].cols.saturating_sub(MIN_TERMINAL_WIDTH));
+    if width_delta == 0 {
+        return Ok(false);
+    }
+
+    let mut widths: Vec<usize> = columns.iter().map(|column| column.cols).collect();
+    widths[donor_index] -= width_delta;
+    widths[recipient_index] += width_delta;
+
+    let mut next_x = viewport.x;
+    for (column, width) in columns.iter_mut().zip(widths) {
+        column.x = next_x;
+        column.cols = width;
+        let cols = percent_dimension(width, viewport.cols);
+        for pane_geometry in &mut column.pane_geometries {
+            pane_geometry.geom.x = next_x;
+            pane_geometry.geom.cols = cols;
+            pane_geometry.geom.stacked = None;
+        }
+        next_x += width;
+    }
+    if next_x != viewport.x + viewport.cols {
+        return Err(anyhow!("Acme columns do not fill the viewport width"));
+    }
+    Ok(true)
 }
 
 #[allow(clippy::borrowed_box)]
