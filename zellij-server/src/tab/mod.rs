@@ -4868,6 +4868,9 @@ impl Tab {
             .and_then(|(x_in_terminal, y_in_terminal, is_visible)| {
                 let x = active_terminal.x() + x_in_terminal;
                 let y = active_terminal.y() + y_in_terminal;
+                // While the pane is scrolled up, the hardware cursor belongs to the live
+                // terminal position rather than the scrollback content currently shown.
+                let is_visible = is_visible && !active_terminal.is_scrolled();
                 let cursor_is_on_acme_title = active_pane_is_tiled
                     && i32::try_from(y).ok().zip(u16::try_from(x).ok()).and_then(
                         |(line, column)| {

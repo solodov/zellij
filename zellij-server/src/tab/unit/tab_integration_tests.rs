@@ -17233,6 +17233,30 @@ fn dragging_inner_collapsed_acme_title_up_expands_that_pane() {
 }
 
 #[test]
+fn scrolled_active_terminal_does_not_show_terminal_cursor() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    let mut pane_contents = String::new();
+    for i in 0..50 {
+        pane_contents.push_str(&format!("line {i}\n\r"));
+    }
+    tab.handle_pty_bytes(1, pane_contents.into_bytes()).unwrap();
+
+    assert!(matches!(
+        tab.get_active_terminal_cursor_position(client_id),
+        Some((_, _, true))
+    ));
+
+    tab.scroll_active_terminal_up(client_id);
+
+    assert!(matches!(
+        tab.get_active_terminal_cursor_position(client_id),
+        Some((_, _, false))
+    ));
+}
+
+#[test]
 fn focused_collapsed_acme_title_does_not_show_terminal_cursor() {
     let size = Size {
         cols: 120,
