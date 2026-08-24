@@ -400,6 +400,8 @@ impl<'a> PaneContentsAndUi<'a> {
         } else {
             None
         };
+        let title_mode_highlight =
+            client_mode == InputMode::Scroll && pane_focused_for_client_id;
         let frame_params = if session_is_mirrored {
             FrameParams {
                 focused_client,
@@ -415,6 +417,7 @@ impl<'a> PaneContentsAndUi<'a> {
                 frameless_title_fills_width: self.frameless_title_fills_width,
                 frameless_title_on_previous_line: self.frameless_title_on_previous_line,
                 acme_title: self.acme_title,
+                title_mode_highlight,
                 acme_title_status,
                 force_render: self.force_render_frame,
                 pane_is_floating,
@@ -449,6 +452,7 @@ impl<'a> PaneContentsAndUi<'a> {
                 frameless_title_fills_width: self.frameless_title_fills_width,
                 frameless_title_on_previous_line: self.frameless_title_on_previous_line,
                 acme_title: self.acme_title,
+                title_mode_highlight,
                 acme_title_status,
                 force_render: self.force_render_frame,
                 pane_is_floating,

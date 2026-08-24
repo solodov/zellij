@@ -1237,7 +1237,7 @@ fn acme_tab_bar_inactive_style_uses_muted_foreground() {
 }
 
 #[test]
-fn acme_tab_bar_uses_mode_colors_outside_normal_and_rename_modes() {
+fn acme_tab_bar_uses_mode_colors_for_tmux_mode() {
     let active_style = acme_tab_bar_style(true, Some(InputMode::Tmux));
     let inactive_style = acme_tab_bar_style(false, Some(InputMode::Tmux));
 
@@ -1250,6 +1250,20 @@ fn acme_tab_bar_uses_mode_colors_outside_normal_and_rename_modes() {
     assert_eq!(
         inactive_style.foreground,
         Some(ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND)
+    );
+}
+
+#[test]
+fn acme_tab_bar_keeps_normal_colors_in_scroll_mode() {
+    let active_style = acme_tab_bar_style(true, Some(InputMode::Scroll));
+    let inactive_style = acme_tab_bar_style(false, Some(InputMode::Scroll));
+
+    assert_eq!(active_style.background, Some(ACME_TAB_BAR_BACKGROUND));
+    assert_eq!(active_style.foreground, Some(ACME_ACTIVE_TAB_BAR_FOREGROUND));
+    assert_eq!(inactive_style.background, Some(ACME_TAB_BAR_BACKGROUND));
+    assert_eq!(
+        inactive_style.foreground,
+        Some(ACME_INACTIVE_TAB_BAR_FOREGROUND)
     );
 }
 

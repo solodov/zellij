@@ -211,7 +211,8 @@ fn acme_tab_bar_style(
     input_mode: Option<InputMode>,
 ) -> RcCharacterStyles {
     let use_mode_colors = match input_mode {
-        Some(InputMode::Normal | InputMode::RenameTab | InputMode::RenamePane) | None => false,
+        Some(InputMode::Normal | InputMode::Scroll | InputMode::RenameTab | InputMode::RenamePane)
+        | None => false,
         Some(_) => true,
     };
     let (background, active_foreground, inactive_foreground) = if use_mode_colors {

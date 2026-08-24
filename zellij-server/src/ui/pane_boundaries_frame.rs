@@ -63,6 +63,9 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
 const ACME_TITLE_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xdd, 0xf7, 0xff));
 const ACME_ACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x6a));
 const ACME_INACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x4a, 0x74, 0x80));
+const MODE_TITLE_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xfb, 0xeb, 0xea));
+const ACTIVE_MODE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xaf, 0x62, 0x60));
+const INACTIVE_MODE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xde, 0x97, 0x95));
 const ACME_ACTIVE_TITLE_BUTTON: char = '■';
 const ACME_INACTIVE_TITLE_BUTTON: char = '□';
 
@@ -70,13 +73,14 @@ pub(crate) fn render_acme_title_line_for_pane(
     title: &str,
     width: usize,
     is_main_client: bool,
+    highlight_title_for_mode: bool,
     _mouse_is_hovering_over_pane: bool,
     acme_title_status: Option<char>,
     status_trailing_spaces: usize,
 ) -> Vec<TerminalCharacter> {
-    let title_style = acme_title_style(is_main_client);
-    let button_style = acme_title_button_style(is_main_client);
-    let status_style = acme_title_status_style(is_main_client);
+    let title_style = acme_title_style(is_main_client, highlight_title_for_mode);
+    let button_style = acme_title_button_style(is_main_client, highlight_title_for_mode);
+    let status_style = acme_title_status_style(is_main_client, highlight_title_for_mode);
     let status_width = acme_title_status
         .map(|status| 1 + status.width().unwrap_or(0) + status_trailing_spaces)
         .filter(|status_width| *status_width <= width)
@@ -139,11 +143,28 @@ pub(crate) fn render_acme_title_line_for_pane(
     line
 }
 
-fn acme_title_style(is_main_client: bool) -> RcCharacterStyles {
+fn acme_title_style(is_main_client: bool, highlight_title_for_mode: bool) -> RcCharacterStyles {
+    let (background, active_foreground, inactive_foreground) = if highlight_title_for_mode {
+        (
+            MODE_TITLE_BACKGROUND,
+            ACTIVE_MODE_TITLE_FOREGROUND,
+            INACTIVE_MODE_TITLE_FOREGROUND,
+        )
+    } else {
+        (
+            ACME_TITLE_BACKGROUND,
+            ACME_ACTIVE_TITLE_FOREGROUND,
+            ACME_INACTIVE_TITLE_FOREGROUND,
+        )
+    };
     let mut styles = RcCharacterStyles::reset();
     styles.update(|styles| {
-        styles.background = Some(ACME_TITLE_BACKGROUND);
-        styles.foreground = Some(acme_title_foreground(is_main_client));
+        styles.background = Some(background);
+        styles.foreground = Some(if is_main_client {
+            active_foreground
+        } else {
+            inactive_foreground
+        });
         styles.underline = Some(AnsiCode::Underline(None));
         if is_main_client {
             styles.bold = Some(AnsiCode::On);
@@ -154,24 +175,22 @@ fn acme_title_style(is_main_client: bool) -> RcCharacterStyles {
     styles
 }
 
-fn acme_title_foreground(is_main_client: bool) -> AnsiCode {
-    if is_main_client {
-        ACME_ACTIVE_TITLE_FOREGROUND
-    } else {
-        ACME_INACTIVE_TITLE_FOREGROUND
-    }
-}
-
-fn acme_title_button_style(is_main_client: bool) -> RcCharacterStyles {
-    let mut styles = acme_title_style(is_main_client);
+fn acme_title_button_style(
+    is_main_client: bool,
+    highlight_title_for_mode: bool,
+) -> RcCharacterStyles {
+    let mut styles = acme_title_style(is_main_client, highlight_title_for_mode);
     styles.update(|styles| {
         styles.bold = Some(AnsiCode::Reset);
     });
     styles
 }
 
-fn acme_title_status_style(is_main_client: bool) -> RcCharacterStyles {
-    acme_title_button_style(is_main_client)
+fn acme_title_status_style(
+    is_main_client: bool,
+    highlight_title_for_mode: bool,
+) -> RcCharacterStyles {
+    acme_title_button_style(is_main_client, highlight_title_for_mode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +222,7 @@ pub struct FrameParams {
     pub frameless_title_fills_width: bool,
     pub frameless_title_on_previous_line: bool,
     pub acme_title: bool,
+    pub title_mode_highlight: bool,
     pub acme_title_status: Option<char>,
     pub force_render: bool,
     pub pane_is_floating: bool,
@@ -241,6 +261,7 @@ pub struct PaneFrame {
     frameless_title_fills_width: bool,
     frameless_title_on_previous_line: bool,
     acme_title: bool,
+    title_mode_highlight: bool,
     acme_title_status: Option<char>,
     is_pinned: bool,
     is_floating: bool,
@@ -284,6 +305,7 @@ impl PaneFrame {
             frameless_title_fills_width: frame_params.frameless_title_fills_width,
             frameless_title_on_previous_line: frame_params.frameless_title_on_previous_line,
             acme_title: frame_params.acme_title,
+            title_mode_highlight: frame_params.title_mode_highlight,
             acme_title_status: frame_params.acme_title_status,
             is_pinned: false,
             is_floating: frame_params.pane_is_floating,
@@ -321,6 +343,41 @@ impl PaneFrame {
     fn client_cursor(&self, client_id: ClientId) -> Vec<TerminalCharacter> {
         let color = client_id_to_colors(client_id, self.style.colors.multiplayer_user_colors);
         background_color(" ", color.map(|c| c.0))
+    }
+    fn title_is_highlighted_for_scroll(&self) -> bool {
+        self.title_mode_highlight || self.scroll_position.0 > 0
+    }
+    fn title_line_characters(&self, characters: &str) -> Vec<TerminalCharacter> {
+        if self.title_is_highlighted_for_scroll() {
+            let (foreground, bold) = if self.is_main_client {
+                (ACTIVE_MODE_TITLE_FOREGROUND, AnsiCode::On)
+            } else {
+                (INACTIVE_MODE_TITLE_FOREGROUND, AnsiCode::Reset)
+            };
+            styled_characters(characters, |styles| {
+                styles.background = Some(MODE_TITLE_BACKGROUND);
+                styles.foreground = Some(foreground);
+                styles.bold = Some(bold);
+            })
+        } else {
+            foreground_color(characters, self.color)
+        }
+    }
+    fn pane_title_characters(&self, characters: &str) -> Vec<TerminalCharacter> {
+        self.title_line_characters(characters)
+    }
+    fn highlight_title_line_for_mode(
+        &self,
+        mut title_line: Vec<TerminalCharacter>,
+    ) -> Vec<TerminalCharacter> {
+        if self.title_is_highlighted_for_scroll() {
+            for character in &mut title_line {
+                character.styles.update(|styles| {
+                    styles.background = Some(MODE_TITLE_BACKGROUND);
+                });
+            }
+        }
+        title_line
     }
     fn get_corner(&self, corner: &'static str) -> &'static str {
         let corner = if !self.should_draw_pane_frames
@@ -376,7 +433,7 @@ impl PaneFrame {
                     Some((mut scroll_indication, scroll_indication_len)),
                 ) => {
                     let mut characters: Vec<_> = scroll_indication.drain(..).collect();
-                    let mut separator = foreground_color(&format!("|"), self.color);
+                    let mut separator = self.title_line_characters("|");
                     characters.append(&mut separator);
                     characters.append(&mut pin_indication);
                     Some((characters, pin_indication_len + scroll_indication_len + 1))
@@ -403,17 +460,14 @@ impl PaneFrame {
         let prefix_len = prefix.chars().count();
         if prefix_len + full_indication_len <= max_length {
             Some((
-                foreground_color(&format!("{}{}", prefix, full_indication), self.color),
+                self.title_line_characters(&format!("{}{}", prefix, full_indication)),
                 prefix_len + full_indication_len,
             ))
         } else if full_indication_len <= max_length {
-            Some((
-                foreground_color(&full_indication, self.color),
-                full_indication_len,
-            ))
+            Some((self.title_line_characters(&full_indication), full_indication_len))
         } else if short_indication_len <= max_length {
             Some((
-                foreground_color(&short_indication, self.color),
+                self.title_line_characters(&short_indication),
                 short_indication_len,
             ))
         } else {
@@ -428,10 +482,7 @@ impl PaneFrame {
         let full_indication = format!(" PIN [{}] ", is_checked);
         let full_indication_len = full_indication.chars().count();
         if full_indication_len <= max_length {
-            Some((
-                foreground_color(&full_indication, self.color),
-                full_indication_len,
-            ))
+            Some((self.title_line_characters(&full_indication), full_indication_len))
         } else {
             None
         }
@@ -605,7 +656,7 @@ impl PaneFrame {
         if max_length <= 6 || self.title.is_empty() {
             None
         } else if full_text.width() <= max_length {
-            Some((foreground_color(&full_text, self.color), full_text.width()))
+            Some((self.pane_title_characters(&full_text), full_text.width()))
         } else {
             let length_of_each_half = (max_length - middle_truncated_sign.width()) / 2;
 
@@ -646,7 +697,7 @@ impl PaneFrame {
                     first_part.width() + middle_truncated_sign.width() + second_part.width(),
                 )
             };
-            Some((foreground_color(&title_left_side, self.color), title_length))
+            Some((self.pane_title_characters(&title_left_side), title_length))
         }
     }
     fn three_part_title_line(
@@ -883,10 +934,12 @@ impl PaneFrame {
     fn render_title(&self) -> Result<Vec<TerminalCharacter>> {
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
 
-        self.render_title_middle(total_title_length)
+        let title_line = self
+            .render_title_middle(total_title_length)
             .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
             .or_else(|| Some(self.title_line_without_middle()))
-            .with_context(|| format!("failed to render title '{}'", self.title))
+            .with_context(|| format!("failed to render title '{}'", self.title))?;
+        Ok(self.highlight_title_line_for_mode(title_line))
     }
     fn render_stack_list_entry(&self, entry: &StackListEntry) -> Vec<TerminalCharacter> {
         let usable_cols = self.geom.cols;
@@ -974,19 +1027,22 @@ impl PaneFrame {
     fn render_one_line_title(&self) -> Result<Vec<TerminalCharacter>> {
         if self.should_draw_pane_frames {
             let total_title_length = self.geom.cols.saturating_sub(2);
-            return self
+            let title_line = self
                 .render_title_middle(total_title_length)
                 .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
                 .or_else(|| Some(self.title_line_without_middle()))
-                .with_context(|| format!("failed to render title '{}'", self.title));
+                .with_context(|| format!("failed to render title '{}'", self.title))?;
+            return Ok(self.highlight_title_line_for_mode(title_line));
         }
 
         if self.acme_title {
-            return Ok(self.render_acme_title_line());
+            return Ok(self.highlight_title_line_for_mode(self.render_acme_title_line()));
         }
 
         if self.frameless_title_fills_width {
-            return Ok(self.title_line_without_middle());
+            return Ok(self.highlight_title_line_for_mode(
+                self.title_line_without_middle(),
+            ));
         }
 
         let width = self.geom.cols;
@@ -997,7 +1053,9 @@ impl PaneFrame {
         let focus_length = focus.as_ref().map(|(_, length)| *length).unwrap_or(0);
         let right_budget = width.saturating_sub(focus_length + title_length);
         let right = self.bracketed_scroll_indicator(right_budget);
-        Ok(self.compose_bracketed_title(focus, title, right))
+        Ok(self.highlight_title_line_for_mode(
+            self.compose_bracketed_title(focus, title, right),
+        ))
     }
     fn render_acme_title_line(&self) -> Vec<TerminalCharacter> {
         // Frameless titles with a right content offset lose their last cell to
@@ -1008,6 +1066,7 @@ impl PaneFrame {
             &self.title,
             self.geom.cols,
             self.is_main_client,
+            self.title_is_highlighted_for_scroll(),
             self.mouse_is_hovering_over_pane,
             self.acme_title_status,
             status_trailing_spaces,
@@ -1029,7 +1088,7 @@ impl PaneFrame {
     }
     fn plain_title_part(&self, content: &str) -> (Vec<TerminalCharacter>, usize) {
         let text = format!(" {} ", content);
-        (foreground_color(&text, self.color), text.width())
+        (self.pane_title_characters(&text), text.width())
     }
     fn bracketed_pane_title(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
         let title_padding = 2;
@@ -1629,6 +1688,7 @@ mod tests {
                 frameless_title_fills_width: false,
                 frameless_title_on_previous_line: false,
                 acme_title: false,
+                title_mode_highlight: false,
                 acme_title_status: None,
                 force_render: false,
                 pane_is_floating: is_floating,
@@ -1710,6 +1770,70 @@ mod tests {
         assert_eq!(
             title_line[15].styles.underline,
             Some(AnsiCode::Underline(None))
+        );
+    }
+
+    #[test]
+    fn acme_scroll_mode_highlights_active_title_with_mode_colors() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+        frame.title_mode_highlight = true;
+
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(characters_to_string(&title_line), " ■ termflow     ");
+        assert_eq!(
+            title_line[1].styles.foreground,
+            Some(ACTIVE_MODE_TITLE_FOREGROUND)
+        );
+        assert_eq!(
+            title_line[3].styles.foreground,
+            Some(ACTIVE_MODE_TITLE_FOREGROUND)
+        );
+        assert_eq!(title_line[3].styles.bold, Some(AnsiCode::On));
+        assert_eq!(
+            title_line[15].styles.background,
+            Some(MODE_TITLE_BACKGROUND)
+        );
+    }
+
+    #[test]
+    fn scroll_mode_highlights_full_frame_pane_title_with_mode_colors() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.title_mode_highlight = true;
+
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            title_line[1].styles.background,
+            Some(MODE_TITLE_BACKGROUND)
+        );
+        assert_eq!(
+            title_line[3].styles.foreground,
+            Some(ACTIVE_MODE_TITLE_FOREGROUND)
+        );
+        assert_eq!(title_line[3].styles.bold, Some(AnsiCode::On));
+        assert_eq!(
+            title_line[0].styles.background,
+            Some(MODE_TITLE_BACKGROUND)
+        );
+    }
+
+    #[test]
+    fn scrolled_pane_highlights_title_even_without_client_mode_flag() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.scroll_position = (3, 12);
+
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            title_line[0].styles.background,
+            Some(MODE_TITLE_BACKGROUND)
+        );
+        assert_eq!(
+            title_line[3].styles.foreground,
+            Some(ACTIVE_MODE_TITLE_FOREGROUND)
         );
     }
 
