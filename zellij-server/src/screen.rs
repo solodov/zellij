@@ -206,12 +206,16 @@ fn acme_tab_drag_exceeded_threshold(start: Position, current: Position) -> bool 
     line_delta > ACME_TAB_DRAG_THRESHOLD || column_delta > ACME_TAB_DRAG_THRESHOLD
 }
 
-fn acme_tab_bar_style(
-    active: bool,
-    input_mode: Option<InputMode>,
-) -> RcCharacterStyles {
+fn acme_tab_bar_style(active: bool, input_mode: Option<InputMode>) -> RcCharacterStyles {
     let use_mode_colors = match input_mode {
-        Some(InputMode::Normal | InputMode::Scroll | InputMode::RenameTab | InputMode::RenamePane)
+        Some(
+            InputMode::Normal
+            | InputMode::Scroll
+            | InputMode::EnterSearch
+            | InputMode::Search
+            | InputMode::RenameTab
+            | InputMode::RenamePane,
+        )
         | None => false,
         Some(_) => true,
     };
@@ -228,12 +232,7 @@ fn acme_tab_bar_style(
             ACME_INACTIVE_TAB_BAR_FOREGROUND,
         )
     };
-    acme_tab_bar_style_with_colors(
-        active,
-        background,
-        active_foreground,
-        inactive_foreground,
-    )
+    acme_tab_bar_style_with_colors(active, background, active_foreground, inactive_foreground)
 }
 
 fn acme_tab_bar_active_rename_name_style() -> RcCharacterStyles {

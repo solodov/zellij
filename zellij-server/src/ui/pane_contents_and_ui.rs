@@ -400,8 +400,10 @@ impl<'a> PaneContentsAndUi<'a> {
         } else {
             None
         };
-        let title_mode_highlight =
-            client_mode == InputMode::Scroll && pane_focused_for_client_id;
+        let title_mode_highlight = matches!(
+            client_mode,
+            InputMode::Scroll | InputMode::EnterSearch | InputMode::Search
+        ) && pane_focused_for_client_id;
         let frame_params = if session_is_mirrored {
             FrameParams {
                 focused_client,
