@@ -10,7 +10,9 @@ mod swap_layouts;
 use crate::panes::TextPlumbPayload;
 use crate::plugins::PluginId;
 use copy_command::CopyCommand;
-use mouse_handler::{AcmeContextMenuState, AcmeHandleDragState};
+use mouse_handler::{
+    AcmeContextMenuState, AcmeHandleDragState, AcmeHoverHelpState, AcmeHoverHelpTarget,
+};
 pub use mouse_handler::{MouseEffect, MouseHandler, PaneEdge, PaneResizeState};
 use std::env::temp_dir;
 use std::net::IpAddr;
@@ -292,6 +294,7 @@ pub(crate) struct Tab {
     plugin_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_last_pane_id: HashMap<ClientId, PaneId>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
+    acme_hover_help: HashMap<ClientId, AcmeHoverHelpState>,
     last_mouse_activity_time: HashMap<ClientId, Instant>,
     last_hint_text: HashMap<ClientId, BTreeMap<usize, StyledText>>,
     last_active_pane_scroll: HashMap<ClientId, Option<(usize, usize)>>,
@@ -1060,6 +1063,7 @@ impl Tab {
             plugin_hover_pane_id: HashMap::new(),
             mouse_last_pane_id: HashMap::new(),
             mouse_help_text_visible: HashMap::new(),
+            acme_hover_help: HashMap::new(),
             last_mouse_activity_time: HashMap::new(),
             last_hint_text: HashMap::new(),
             last_active_pane_scroll: HashMap::new(),
@@ -2311,6 +2315,7 @@ impl Tab {
             .map(|c| c.change_to_default_mode()); // TODO: no races?
         self.connected_clients.borrow_mut().remove(&client_id);
         self.mouse_help_text_visible.remove(&client_id);
+        self.acme_hover_help.remove(&client_id);
         self.mouse_last_pane_id.remove(&client_id);
         self.acme_context_menus.remove(&client_id);
         self.last_mouse_activity_time.remove(&client_id);
@@ -2338,6 +2343,7 @@ impl Tab {
             .unwrap_or_else(|| self.default_mode_info.clone());
         self.connected_clients.borrow_mut().remove(&client_id);
         self.acme_context_menus.remove(&client_id);
+        self.acme_hover_help.remove(&client_id);
         (client_id, client_mode_info)
     }
     pub fn has_no_connected_clients(&self) -> bool {
@@ -5368,6 +5374,8 @@ impl Tab {
                 .with_context(err_context)?;
         }
 
+        MouseHandler::render_acme_hover_help(self, output, client_id_override)
+            .with_context(err_context)?;
         MouseHandler::render_acme_context_menus(self, output, client_id_override)
             .with_context(err_context)?;
         self.render_cursor(output);
@@ -5404,7 +5412,9 @@ impl Tab {
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         for client_id in connected_clients {
-            if self.acme_context_menus.contains_key(&client_id) {
+            if self.acme_context_menus.contains_key(&client_id)
+                || MouseHandler::acme_hover_help_visible_for_client(self, client_id)
+            {
                 output.add_post_vte_instruction_to_client(client_id, "\u{1b}[?25l");
                 continue;
             }
@@ -7160,6 +7170,29 @@ impl Tab {
         self.mouse_help_text_visible.insert(client_id, false);
     }
 
+    pub fn clear_acme_hover_help(&mut self, client_id: ClientId) -> bool {
+        if self.acme_hover_help.remove(&client_id).is_some() {
+            self.set_force_render();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_acme_tab_bar_hover_help(
+        &mut self,
+        client_id: ClientId,
+        position: Position,
+        over_tab_square: bool,
+    ) -> Result<bool> {
+        let target = if over_tab_square {
+            AcmeHoverHelpTarget::AcmeTabSquare
+        } else {
+            AcmeHoverHelpTarget::AcmeTab
+        };
+        MouseHandler::update_acme_tab_bar_hover_help(self, client_id, position, target)
+    }
+
     pub fn update_active_pane_name(&mut self, buf: Vec<u8>, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to update name of active pane to '{buf:?}' for client {client_id}");
@@ -8164,6 +8197,7 @@ impl Tab {
         self.plugin_hover_pane_id.clear();
         self.mouse_last_pane_id.clear();
         self.mouse_help_text_visible.clear();
+        self.acme_hover_help.clear();
     }
     pub fn update_web_sharing(&mut self, web_sharing: WebSharing) {
         let old_value = self.web_sharing;

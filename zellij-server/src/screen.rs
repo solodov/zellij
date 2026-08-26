@@ -4669,11 +4669,41 @@ impl Screen {
         if self.acme_tab_drag.is_some() {
             return self.handle_acme_tab_drag_mouse_event(event, client_id);
         }
+        let max_cols = self.size_for_client(Some(client_id)).cols;
+        let target = self.acme_tab_bar_hit_target(event.position, max_cols);
+        let is_buttonless_motion = event.event_type == MouseEventType::Motion
+            && !event.left
+            && !event.right
+            && !event.middle
+            && !event.wheel_up
+            && !event.wheel_down
+            && !event.wheel_left
+            && !event.wheel_right;
+        if is_buttonless_motion && self.acme_tab_bar_enabled() && event.position.line() == 0 {
+            let should_render = match target {
+                Some(target) => {
+                    let over_tab_square = matches!(target, AcmeTabBarHitTarget::TabSquare { .. });
+                    self.get_active_tab_mut(client_id)?
+                        .update_acme_tab_bar_hover_help(
+                            client_id,
+                            event.position,
+                            over_tab_square,
+                        )?
+                },
+                None => self
+                    .get_active_tab_mut(client_id)
+                    .map(|tab| tab.clear_acme_hover_help(client_id))
+                    .unwrap_or(false),
+            };
+            if should_render {
+                self.render(None)?;
+            }
+            return Ok(true);
+        }
         if event.event_type != MouseEventType::Press {
             return Ok(false);
         }
-        let max_cols = self.size_for_client(Some(client_id)).cols;
-        let Some(target) = self.acme_tab_bar_hit_target(event.position, max_cols) else {
+        let Some(target) = target else {
             return Ok(false);
         };
         match target {
@@ -5116,6 +5146,15 @@ impl Screen {
     pub fn host_terminal_focus_changed(&mut self, client_id: ClientId, focused: bool) {
         let was_focused = self.client_host_is_focused(&client_id);
         self.client_host_focused.insert(client_id, focused);
+        if !focused {
+            let cleared = self
+                .get_active_tab_mut(client_id)
+                .map(|tab| tab.clear_acme_hover_help(client_id))
+                .unwrap_or(false);
+            if cleared {
+                self.render(None).non_fatal();
+            }
+        }
         if was_focused == focused {
             return;
         }

@@ -664,6 +664,7 @@ pub enum BackgroundJobContext {
     QueryZellijWebServerStatus,
     ClearHelpText,
     ClearCommandOutputFlash,
+    ShowAcmeHoverHelp,
     FlashPaneBell,
     StopFlashPaneBell,
     FlashTabBell,

@@ -73,6 +73,9 @@ pub enum BackgroundJob {
     ClearCommandOutputFlash {
         pane_id: PaneId,
     },
+    ShowAcmeHoverHelp {
+        client_id: ClientId,
+    },
     FlashPaneBell(Vec<PaneId>),
     StopFlashPaneBell(Vec<PaneId>),
     FlashTabBell(usize),     // usize = tab_id
@@ -107,6 +110,7 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             BackgroundJob::ClearCommandOutputFlash { .. } => {
                 BackgroundJobContext::ClearCommandOutputFlash
             },
+            BackgroundJob::ShowAcmeHoverHelp { .. } => BackgroundJobContext::ShowAcmeHoverHelp,
             BackgroundJob::FlashPaneBell(..) => BackgroundJobContext::FlashPaneBell,
             BackgroundJob::StopFlashPaneBell(..) => BackgroundJobContext::StopFlashPaneBell,
             BackgroundJob::FlashTabBell(..) => BackgroundJobContext::FlashTabBell,
@@ -127,6 +131,7 @@ static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 static REPAINT_DELAY_MS: u64 = 10;
 static HELP_TEXT_DEBOUNCE_DURATION: u64 = 5000;
 static COMMAND_OUTPUT_FLASH_DURATION_MS: u64 = 400;
+static ACME_HOVER_HELP_DELAY_MS: u64 = 1400;
 static LONG_RUNNING_COMMAND_TITLE_ANIMATION_INTERVAL_MS: u64 = 100;
 
 #[derive(Clone)]
@@ -170,6 +175,8 @@ pub(crate) fn background_jobs_main(
     let pending_help_text_clear: Arc<Mutex<HashMap<ClientId, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let pending_command_output_flash_clear: Arc<Mutex<HashMap<PaneId, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pending_acme_hover_help: Arc<Mutex<HashMap<ClientId, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let pending_long_running_command_title_render = Arc::new(AtomicBool::new(false));
     let mut flashing_pane_bells: HashMap<PaneId, Arc<AtomicBool>> = HashMap::new();
@@ -640,6 +647,56 @@ pub(crate) fn background_jobs_main(
                                         let _ = senders.send_to_server(
                                             ServerInstruction::ClearCommandOutputFlash(pane_id),
                                         );
+                                        break;
+                                    },
+                                }
+                            }
+                        }
+                    });
+                }
+            },
+            BackgroundJob::ShowAcmeHoverHelp { client_id } => {
+                let should_spawn = {
+                    let mut pending = pending_acme_hover_help.lock().unwrap();
+                    let current_time = Instant::now();
+                    let should_spawn = !pending.contains_key(&client_id);
+                    pending.insert(client_id, current_time);
+                    should_spawn
+                };
+
+                if should_spawn {
+                    runtime.spawn({
+                        let senders = bus.senders.clone();
+                        let pending = pending_acme_hover_help.clone();
+                        let debounce_duration = Duration::from_millis(ACME_HOVER_HELP_DELAY_MS);
+                        async move {
+                            tokio::time::sleep(debounce_duration).await;
+                            loop {
+                                let next_sleep_duration = {
+                                    let mut pending = pending.lock().unwrap();
+                                    match pending.get(&client_id) {
+                                        Some(&last_motion_time) => {
+                                            let time_since_motion =
+                                                Instant::now().duration_since(last_motion_time);
+                                            if time_since_motion >= debounce_duration {
+                                                pending.remove(&client_id);
+                                                None
+                                            } else {
+                                                let remaining = debounce_duration
+                                                    .saturating_sub(time_since_motion);
+                                                Some(remaining)
+                                            }
+                                        },
+                                        None => break,
+                                    }
+                                };
+
+                                match next_sleep_duration {
+                                    Some(duration) => {
+                                        tokio::time::sleep(duration).await;
+                                    },
+                                    None => {
+                                        let _ = senders.send_to_screen(ScreenInstruction::Render);
                                         break;
                                     },
                                 }

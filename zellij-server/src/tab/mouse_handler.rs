@@ -304,7 +304,24 @@ pub(super) enum AcmeContextMenuAction {
     Cancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AcmeHoverHelpState {
+    target: AcmeHoverHelpTarget,
+    position: Position,
+    first_seen: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcmeHoverHelpTarget {
+    PaneFrame { edge: Option<PaneEdge> },
+    AcmeTitle,
+    AcmeTitleButton,
+    AcmeTabSquare,
+    AcmeTab,
+}
+
 const ACME_HANDLE_DRAG_THRESHOLD: usize = 1;
+const ACME_HOVER_HELP_DELAY_MS: u128 = 1400;
 const ACME_CONTEXT_MENU_LABEL_WIDTH: usize = 6;
 const ACME_CONTEXT_MENU_CONTENT_WIDTH: usize = ACME_CONTEXT_MENU_LABEL_WIDTH + 2;
 const ACME_CONTEXT_MENU_WIDTH: usize = ACME_CONTEXT_MENU_CONTENT_WIDTH + 2;
@@ -487,6 +504,206 @@ fn acme_context_menu_item_style(selected: bool) -> RcCharacterStyles {
         style.italic = Some(AnsiCode::Reset);
     });
     style
+}
+
+fn acme_hover_help_is_visible(help: AcmeHoverHelpState) -> bool {
+    help.first_seen.elapsed().as_millis() >= ACME_HOVER_HELP_DELAY_MS
+}
+
+fn acme_hover_help_character_chunks(
+    help: AcmeHoverHelpState,
+    display_size: Size,
+) -> Vec<CharacterChunk> {
+    let lines = acme_hover_help_lines(help.target);
+    let content_width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let width = content_width + 2;
+    let height = lines.len() + 2;
+    let (x, y) = acme_hover_help_position(help.position, display_size, width, height);
+
+    let mut chunks = vec![CharacterChunk::new(
+        acme_hover_help_border_row(true, content_width),
+        x,
+        y,
+    )];
+    for (index, line) in lines.iter().enumerate() {
+        chunks.push(CharacterChunk::new(
+            acme_hover_help_text_row(line, content_width),
+            x,
+            y + index + 1,
+        ));
+    }
+    chunks.push(CharacterChunk::new(
+        acme_hover_help_border_row(false, content_width),
+        x,
+        y + height - 1,
+    ));
+    chunks
+}
+
+fn acme_hover_help_position(
+    position: Position,
+    display_size: Size,
+    width: usize,
+    height: usize,
+) -> (usize, usize) {
+    let right_of_cursor = position.column().saturating_add(1);
+    let x = if right_of_cursor.saturating_add(width) <= display_size.cols {
+        right_of_cursor
+    } else {
+        position.column().saturating_sub(width)
+    };
+    let below_cursor = usize::try_from(position.line())
+        .unwrap_or_default()
+        .saturating_add(1);
+    let y = if below_cursor.saturating_add(height) <= display_size.rows {
+        below_cursor
+    } else {
+        usize::try_from(position.line())
+            .unwrap_or_default()
+            .saturating_sub(height)
+    };
+    (
+        x.min(display_size.cols.saturating_sub(width)),
+        y.min(display_size.rows.saturating_sub(height)),
+    )
+}
+
+fn position_is_on_display_edge(position: Position, display_size: Size) -> bool {
+    let Ok(line) = usize::try_from(position.line()) else {
+        return true;
+    };
+    display_size.cols == 0
+        || display_size.rows == 0
+        || position.column() == 0
+        || position.column() >= display_size.cols.saturating_sub(1)
+        || line == 0
+        || line >= display_size.rows.saturating_sub(1)
+}
+
+fn acme_hover_help_border_row(top: bool, content_width: usize) -> Vec<TerminalCharacter> {
+    let style = acme_hover_help_border_style();
+    let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+    std::iter::once(left)
+        .chain(std::iter::repeat('─').take(content_width))
+        .chain(std::iter::once(right))
+        .map(|character| TerminalCharacter::new_singlewidth_styled(character, style.clone()))
+        .collect()
+}
+
+fn acme_hover_help_text_row(line: &str, content_width: usize) -> Vec<TerminalCharacter> {
+    let border_style = acme_hover_help_border_style();
+    let text_style = acme_hover_help_text_style();
+    let content = format!(
+        " {:<width$} ",
+        line,
+        width = content_width.saturating_sub(2)
+    );
+    let mut row = vec![TerminalCharacter::new_singlewidth_styled(
+        '│',
+        border_style.clone(),
+    )];
+    row.extend(
+        content.chars().map(|character| {
+            TerminalCharacter::new_singlewidth_styled(character, text_style.clone())
+        }),
+    );
+    row.push(TerminalCharacter::new_singlewidth_styled('│', border_style));
+    row
+}
+
+fn acme_hover_help_border_style() -> RcCharacterStyles {
+    acme_hover_help_style()
+}
+
+fn acme_hover_help_text_style() -> RcCharacterStyles {
+    acme_hover_help_style()
+}
+
+fn acme_hover_help_style() -> RcCharacterStyles {
+    let mut style = RcCharacterStyles::reset();
+    style.update(|style| {
+        style.background = Some(AnsiCode::RgbCode((0xff, 0xf3, 0xdd)));
+        style.foreground = Some(AnsiCode::RgbCode((0x8a, 0x4f, 0x1d)));
+        style.bold = Some(AnsiCode::Reset);
+        style.italic = Some(AnsiCode::Reset);
+    });
+    style
+}
+
+fn acme_hover_help_target(ctx: &MouseEventContext) -> Option<AcmeHoverHelpTarget> {
+    if ctx.acme_title_button_pane_id.is_some() {
+        return Some(AcmeHoverHelpTarget::AcmeTitleButton);
+    }
+    if ctx.acme_title_pane_id.is_some() {
+        return Some(AcmeHoverHelpTarget::AcmeTitle);
+    }
+    if let Some(details) = ctx.clicked_pane {
+        if details.on_frame {
+            return Some(AcmeHoverHelpTarget::PaneFrame { edge: details.edge });
+        }
+    }
+    None
+}
+
+fn acme_hover_help_lines(target: AcmeHoverHelpTarget) -> Vec<&'static str> {
+    match target {
+        AcmeHoverHelpTarget::PaneFrame { edge } => {
+            if edge.is_some() {
+                vec!["left drag: resize", "ctrl-scroll: resize", "right: no-op"]
+            } else {
+                vec!["left drag: move", "right: no-op"]
+            }
+        },
+        AcmeHoverHelpTarget::AcmeTitle => vec![
+            "ctrl-left: equalize rows",
+            "alt-left/right: swap column",
+            "right: no-op",
+        ],
+        AcmeHoverHelpTarget::AcmeTitleButton => vec![
+            "left drag: move",
+            "ctrl-left: new pane",
+            "ctrl-right: new column",
+            "middle: close",
+        ],
+        AcmeHoverHelpTarget::AcmeTabSquare => {
+            vec!["left: switch/drag", "ctrl-right: new tab", "middle: close"]
+        },
+        AcmeHoverHelpTarget::AcmeTab => vec!["left: switch", "drag square: reorder"],
+    }
+}
+
+fn schedule_acme_hover_help(
+    tab: &mut Tab,
+    target: AcmeHoverHelpTarget,
+    position: Position,
+    client_id: ClientId,
+) -> Result<bool> {
+    let was_visible = tab
+        .acme_hover_help
+        .get(&client_id)
+        .copied()
+        .map(acme_hover_help_is_visible)
+        .unwrap_or(false);
+    if was_visible {
+        tab.set_force_render();
+    }
+    tab.acme_hover_help.insert(
+        client_id,
+        AcmeHoverHelpState {
+            target,
+            position,
+            first_seen: Instant::now(),
+        },
+    );
+    tab.senders
+        .send_to_background_jobs(BackgroundJob::ShowAcmeHoverHelp { client_id })
+        .context("failed to schedule Acme hover help")?;
+    Ok(was_visible)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,7 +889,52 @@ impl MouseHandler {
         }
         let context = Self::gather_mouse_event_context(tab, event, client_id, passthrough_pane_id)?;
         let action = Self::determine_mouse_action(event, &context)?;
-        Self::execute_mouse_action(tab, action, event, client_id)
+        let mut effect = Self::execute_mouse_action(tab, action, event, client_id)?;
+        if Self::update_acme_hover_help(tab, event, &context, client_id)? {
+            effect.state_changed = true;
+        }
+        Ok(effect)
+    }
+
+    pub(super) fn acme_hover_help_visible_for_client(tab: &Tab, client_id: ClientId) -> bool {
+        tab.acme_hover_help
+            .get(&client_id)
+            .copied()
+            .map(acme_hover_help_is_visible)
+            .unwrap_or(false)
+    }
+
+    pub(super) fn render_acme_hover_help(
+        tab: &Tab,
+        output: &mut Output,
+        client_id_override: Option<ClientId>,
+    ) -> Result<()> {
+        let mut clients: HashSet<ClientId> =
+            tab.connected_clients.borrow().iter().copied().collect();
+        if let Some(client_id) = client_id_override {
+            clients.insert(client_id);
+        }
+        for client_id in clients {
+            if let Some(help) = tab.acme_hover_help.get(&client_id).copied() {
+                if acme_hover_help_is_visible(help) {
+                    output.add_character_chunks_to_client(
+                        client_id,
+                        acme_hover_help_character_chunks(help, tab.size),
+                        Some(usize::MAX),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn update_acme_tab_bar_hover_help(
+        tab: &mut Tab,
+        client_id: ClientId,
+        position: Position,
+        target: AcmeHoverHelpTarget,
+    ) -> Result<bool> {
+        schedule_acme_hover_help(tab, target, position, client_id)
     }
 
     pub(super) fn render_acme_context_menus(
@@ -695,6 +957,50 @@ impl MouseHandler {
             }
         }
         Ok(())
+    }
+
+    fn update_acme_hover_help(
+        tab: &mut Tab,
+        event: &MouseEvent,
+        ctx: &MouseEventContext,
+        client_id: ClientId,
+    ) -> Result<bool> {
+        let mut should_render = tab.mouse_help_text_visible.remove(&client_id).is_some();
+
+        let is_buttonless_motion = event.event_type == MouseEventType::Motion
+            && !event.left
+            && !event.right
+            && !event.middle
+            && !event.wheel_up
+            && !event.wheel_down
+            && !event.wheel_left
+            && !event.wheel_right;
+        if is_buttonless_motion
+            && (position_is_on_display_edge(event.position, tab.size)
+                || (tab.pane_frame_style.draws_titles() && event.position.line() == 0))
+        {
+            if tab.acme_hover_help.remove(&client_id).is_some() {
+                tab.set_force_render();
+                should_render = true;
+            }
+            return Ok(should_render);
+        }
+
+        if is_buttonless_motion {
+            if let Some(target) = acme_hover_help_target(ctx) {
+                if schedule_acme_hover_help(tab, target, event.position, client_id)? {
+                    should_render = true;
+                }
+            } else if tab.acme_hover_help.remove(&client_id).is_some() {
+                tab.set_force_render();
+                should_render = true;
+            }
+        } else if tab.acme_hover_help.remove(&client_id).is_some() {
+            tab.set_force_render();
+            should_render = true;
+        }
+
+        Ok(should_render)
     }
 
     fn intercept_guest_modal_mouse_event(
