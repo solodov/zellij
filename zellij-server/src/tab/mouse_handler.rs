@@ -1,16 +1,18 @@
+use std::collections::HashSet;
 use std::time::Instant;
-use zellij_utils::data::{Direction, Resize, ResizeStrategy};
+use zellij_utils::data::{Direction, InputMode, Resize, ResizeStrategy};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
-use zellij_utils::pane_size::PaneGeom;
+use zellij_utils::pane_size::{PaneGeom, Size};
 use zellij_utils::position::Position;
 
 use crate::background_jobs::BackgroundJob;
-use crate::panes::{PaneId, TextPlumbPayload};
+use crate::output::{CharacterChunk, Output};
+use crate::panes::{AnsiCode, PaneId, RcCharacterStyles, TerminalCharacter, TextPlumbPayload};
 use crate::plugins::PluginInstruction;
 use crate::pty::PtyInstruction;
 use crate::screen::{GuestModalOutcome, ScreenInstruction};
-use crate::ClientId;
+use crate::{ClientId, ServerInstruction};
 
 use super::{Pane, Tab};
 
@@ -148,6 +150,16 @@ enum MouseAction {
     StopAcmeHandleDrag {
         position: Position,
     },
+    StartAcmeContextMenu {
+        pane_id: PaneId,
+        position: Position,
+    },
+    UpdateAcmeContextMenu {
+        position: Position,
+    },
+    FinishAcmeContextMenu {
+        position: Position,
+    },
     NewAcmePane {
         pane_id: PaneId,
     },
@@ -274,7 +286,208 @@ pub(super) struct AcmeHandleDragState {
     is_dragging: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AcmeContextMenuState {
+    pane_id: PaneId,
+    anchor_position: Position,
+    x: usize,
+    y: usize,
+    selected_action: Option<AcmeContextMenuAction>,
+    drag_offset: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcmeContextMenuAction {
+    Put,
+    Send,
+    Look,
+    Cancel,
+}
+
 const ACME_HANDLE_DRAG_THRESHOLD: usize = 1;
+const ACME_CONTEXT_MENU_LABEL_WIDTH: usize = 6;
+const ACME_CONTEXT_MENU_CONTENT_WIDTH: usize = ACME_CONTEXT_MENU_LABEL_WIDTH + 2;
+const ACME_CONTEXT_MENU_WIDTH: usize = ACME_CONTEXT_MENU_CONTENT_WIDTH + 2;
+const ACME_CONTEXT_MENU_ITEM_COUNT: usize = 4;
+const ACME_CONTEXT_MENU_HEIGHT: usize = ACME_CONTEXT_MENU_ITEM_COUNT + 2;
+const ACME_CONTEXT_MENU_ITEMS: [(AcmeContextMenuAction, &str); ACME_CONTEXT_MENU_ITEM_COUNT] = [
+    (AcmeContextMenuAction::Put, "put"),
+    (AcmeContextMenuAction::Send, "send"),
+    (AcmeContextMenuAction::Look, "look"),
+    (AcmeContextMenuAction::Cancel, "cancel"),
+];
+
+impl AcmeContextMenuState {
+    fn new(pane_id: PaneId, anchor_position: Position, display_size: Size) -> Self {
+        let anchor_x = anchor_position.column();
+        let anchor_y = anchor_position.line().max(0) as usize;
+        let x = acme_context_menu_x(anchor_x, display_size.cols);
+        let y = anchor_y.min(display_size.rows.saturating_sub(ACME_CONTEXT_MENU_HEIGHT));
+        AcmeContextMenuState {
+            pane_id,
+            anchor_position,
+            x,
+            y,
+            selected_action: None,
+            drag_offset: None,
+        }
+    }
+
+    fn update_for_mouse_position(&mut self, position: Position, display_size: Size) -> bool {
+        let previous = *self;
+        if self.contains_position(position) {
+            if let Some(action) = self.action_at(position) {
+                self.selected_action = Some(action);
+                self.drag_offset = Some((
+                    position.column().saturating_sub(self.x),
+                    usize::try_from(position.line())
+                        .unwrap_or_default()
+                        .saturating_sub(self.y),
+                ));
+            }
+        } else if let Some((offset_x, offset_y)) = self.drag_offset {
+            self.x = position
+                .column()
+                .saturating_sub(offset_x)
+                .min(display_size.cols.saturating_sub(ACME_CONTEXT_MENU_WIDTH));
+            self.y = usize::try_from(position.line())
+                .unwrap_or_default()
+                .saturating_sub(offset_y)
+                .min(display_size.rows.saturating_sub(ACME_CONTEXT_MENU_HEIGHT));
+            self.selected_action = self.action_at(position);
+        }
+        *self != previous
+    }
+
+    fn contains_position(&self, position: Position) -> bool {
+        let Ok(line) = usize::try_from(position.line()) else {
+            return false;
+        };
+        let column = position.column();
+        column >= self.x
+            && column < self.x.saturating_add(ACME_CONTEXT_MENU_WIDTH)
+            && line >= self.y
+            && line < self.y.saturating_add(ACME_CONTEXT_MENU_HEIGHT)
+    }
+
+    fn action_at(&self, position: Position) -> Option<AcmeContextMenuAction> {
+        let line = usize::try_from(position.line()).ok()?;
+        let column = position.column();
+        if column <= self.x || column >= self.x.saturating_add(ACME_CONTEXT_MENU_WIDTH - 1) {
+            return None;
+        }
+        if line <= self.y || line >= self.y.saturating_add(ACME_CONTEXT_MENU_HEIGHT - 1) {
+            return None;
+        }
+        ACME_CONTEXT_MENU_ITEMS
+            .get(line - self.y - 1)
+            .map(|(action, _label)| *action)
+    }
+}
+
+fn acme_context_menu_x(anchor_x: usize, screen_cols: usize) -> usize {
+    if screen_cols <= ACME_CONTEXT_MENU_WIDTH {
+        return 0;
+    }
+    let right_of_anchor = anchor_x.saturating_add(1);
+    if right_of_anchor.saturating_add(ACME_CONTEXT_MENU_WIDTH) <= screen_cols {
+        right_of_anchor
+    } else {
+        anchor_x.saturating_sub(ACME_CONTEXT_MENU_WIDTH)
+    }
+}
+
+fn non_blank_text(text: String) -> Option<String> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn text_with_trailing_enter(mut text: String) -> Vec<u8> {
+    if !text.ends_with('\n') && !text.ends_with('\r') {
+        text.push('\r');
+    }
+    text.into_bytes()
+}
+
+fn acme_context_menu_character_chunks(menu: AcmeContextMenuState) -> Vec<CharacterChunk> {
+    let mut chunks = vec![CharacterChunk::new(
+        acme_context_menu_border_row(true),
+        menu.x,
+        menu.y,
+    )];
+    for (index, (action, label)) in ACME_CONTEXT_MENU_ITEMS.iter().enumerate() {
+        let selected = menu.selected_action == Some(*action);
+        chunks.push(CharacterChunk::new(
+            acme_context_menu_item_row(label, selected),
+            menu.x,
+            menu.y + index + 1,
+        ));
+    }
+    chunks.push(CharacterChunk::new(
+        acme_context_menu_border_row(false),
+        menu.x,
+        menu.y + ACME_CONTEXT_MENU_HEIGHT - 1,
+    ));
+    chunks
+}
+
+fn acme_context_menu_border_row(top: bool) -> Vec<TerminalCharacter> {
+    let style = acme_context_menu_border_style();
+    let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+    std::iter::once(left)
+        .chain(std::iter::repeat('─').take(ACME_CONTEXT_MENU_CONTENT_WIDTH))
+        .chain(std::iter::once(right))
+        .map(|character| TerminalCharacter::new_singlewidth_styled(character, style.clone()))
+        .collect()
+}
+
+fn acme_context_menu_item_row(label: &str, selected: bool) -> Vec<TerminalCharacter> {
+    let border_style = acme_context_menu_border_style();
+    let item_style = acme_context_menu_item_style(selected);
+    let content = format!(" {:<width$} ", label, width = ACME_CONTEXT_MENU_LABEL_WIDTH);
+    let mut row = vec![TerminalCharacter::new_singlewidth_styled(
+        '│',
+        border_style.clone(),
+    )];
+    row.extend(
+        content.chars().map(|character| {
+            TerminalCharacter::new_singlewidth_styled(character, item_style.clone())
+        }),
+    );
+    row.push(TerminalCharacter::new_singlewidth_styled('│', border_style));
+    row
+}
+
+fn acme_context_menu_border_style() -> RcCharacterStyles {
+    let mut style = RcCharacterStyles::reset();
+    style.update(|style| {
+        style.background = Some(AnsiCode::RgbCode((0xe4, 0xf6, 0xd3)));
+        style.foreground = Some(AnsiCode::RgbCode((0x1f, 0x5b, 0x2a)));
+        style.bold = Some(AnsiCode::Reset);
+        style.italic = Some(AnsiCode::Reset);
+    });
+    style
+}
+
+fn acme_context_menu_item_style(selected: bool) -> RcCharacterStyles {
+    let mut style = RcCharacterStyles::reset();
+    style.update(|style| {
+        if selected {
+            style.background = Some(AnsiCode::RgbCode((0x1f, 0x5b, 0x2a)));
+            style.foreground = Some(AnsiCode::RgbCode((0xe4, 0xf6, 0xd3)));
+            style.bold = Some(AnsiCode::On);
+        } else {
+            style.background = Some(AnsiCode::RgbCode((0xe4, 0xf6, 0xd3)));
+            style.foreground = Some(AnsiCode::RgbCode((0x1f, 0x5b, 0x2a)));
+            style.bold = Some(AnsiCode::Reset);
+        }
+        style.italic = Some(AnsiCode::Reset);
+    });
+    style
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClickedPaneDetails {
@@ -296,6 +509,7 @@ struct MouseEventContext {
     selecting_with_mouse: bool,
     pane_being_moved: bool,
     acme_handle_drag: Option<AcmeHandleDragState>,
+    acme_context_menu: Option<AcmeContextMenuState>,
     clicked_pane: Option<ClickedPaneDetails>,
     advanced_mouse_actions: bool,
     acme_vertical_border_hit: bool,
@@ -450,12 +664,37 @@ impl MouseHandler {
         client_id: ClientId,
         passthrough_pane_id: Option<PaneId>,
     ) -> Result<MouseEffect> {
-        if let Some(effect) = Self::intercept_guest_modal_mouse_event(tab, event, client_id)? {
-            return Ok(effect);
+        let context_menu_is_active = tab.acme_context_menus.contains_key(&client_id);
+        if !event.right && !context_menu_is_active {
+            if let Some(effect) = Self::intercept_guest_modal_mouse_event(tab, event, client_id)? {
+                return Ok(effect);
+            }
         }
         let context = Self::gather_mouse_event_context(tab, event, client_id, passthrough_pane_id)?;
         let action = Self::determine_mouse_action(event, &context)?;
         Self::execute_mouse_action(tab, action, event, client_id)
+    }
+
+    pub(super) fn render_acme_context_menus(
+        tab: &Tab,
+        output: &mut Output,
+        client_id_override: Option<ClientId>,
+    ) -> Result<()> {
+        let mut clients: HashSet<ClientId> =
+            tab.connected_clients.borrow().iter().copied().collect();
+        if let Some(client_id) = client_id_override {
+            clients.insert(client_id);
+        }
+        for client_id in clients {
+            if let Some(menu) = tab.acme_context_menus.get(&client_id) {
+                output.add_character_chunks_to_client(
+                    client_id,
+                    acme_context_menu_character_chunks(*menu),
+                    Some(usize::MAX),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn intercept_guest_modal_mouse_event(
@@ -586,6 +825,7 @@ impl MouseHandler {
             selecting_with_mouse: tab.selecting_with_mouse_in_pane.is_some(),
             pane_being_moved: tab.floating_panes.pane_is_being_moved_with_mouse(),
             acme_handle_drag: tab.acme_handle_drag,
+            acme_context_menu: tab.acme_context_menus.get(&client_id).copied(),
             clicked_pane,
             advanced_mouse_actions: tab.advanced_mouse_actions,
             acme_vertical_border_hit,
@@ -707,6 +947,111 @@ impl MouseHandler {
             tab.acme_toggle_title_button_pane(client_id);
             Ok(MouseEffect::state_changed())
         }
+    }
+
+    fn execute_acme_context_menu_action(
+        tab: &mut Tab,
+        menu: AcmeContextMenuState,
+        action: AcmeContextMenuAction,
+        release_position: Position,
+        client_id: ClientId,
+    ) -> Result<()> {
+        match action {
+            AcmeContextMenuAction::Put => {
+                if let Some(target_pane_id) =
+                    Self::terminal_pane_id_at_position(tab, release_position)?
+                {
+                    if let Some(text) = Self::selected_or_word_for_menu(tab, menu, client_id) {
+                        tab.paste_to_pane_id(text.into_bytes(), target_pane_id, None)
+                            .context("failed to put context-menu text into pane")?;
+                    }
+                }
+            },
+            AcmeContextMenuAction::Send => {
+                if let Some(target_pane_id) =
+                    Self::terminal_pane_id_at_position(tab, release_position)?
+                {
+                    if let Some(text) = Self::selected_or_word_for_menu(tab, menu, client_id) {
+                        tab.write_to_pane_id(
+                            &None,
+                            text_with_trailing_enter(text),
+                            false,
+                            target_pane_id,
+                            Some(client_id),
+                            None,
+                        )
+                        .context("failed to send context-menu text to pane")?;
+                    }
+                }
+            },
+            AcmeContextMenuAction::Look => {
+                if let Some(target_pane_id) =
+                    Self::terminal_pane_id_at_position(tab, release_position)?
+                {
+                    if let Some(text) = Self::selected_or_word_for_menu(tab, menu, client_id) {
+                        tab.focus_pane_with_id(target_pane_id, false, false, client_id)?;
+                        if let Some(pane) = tab.get_pane_with_id_mut(target_pane_id) {
+                            pane.clear_search();
+                            pane.update_search_term(&text);
+                        }
+                        Self::switch_client_to_search_mode(tab, client_id)?;
+                    }
+                }
+            },
+            AcmeContextMenuAction::Cancel => {},
+        }
+        Ok(())
+    }
+
+    fn switch_client_to_search_mode(tab: &mut Tab, client_id: ClientId) -> Result<()> {
+        let default_mode = tab
+            .default_mode_info
+            .base_mode
+            .unwrap_or(tab.default_mode_info.mode);
+        let mut mode_info = tab
+            .mode_info
+            .borrow()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| tab.default_mode_info.clone());
+        mode_info.mode = InputMode::Search;
+        mode_info.base_mode = Some(default_mode);
+        tab.change_mode_info(mode_info, client_id);
+        tab.mark_active_pane_for_rerender(client_id);
+        tab.update_input_modes()?;
+        tab.senders
+            .send_to_server(ServerInstruction::ChangeMode(
+                client_id,
+                InputMode::Search,
+                None,
+            ))
+            .context("failed to switch to search mode from context-menu look")
+    }
+
+    fn selected_or_word_for_menu(
+        tab: &Tab,
+        menu: AcmeContextMenuState,
+        client_id: ClientId,
+    ) -> Option<String> {
+        let pane = tab.get_pane_with_id(menu.pane_id)?;
+        pane.get_selected_text(client_id)
+            .and_then(non_blank_text)
+            .or_else(|| {
+                let relative_position = pane.relative_position(&menu.anchor_position);
+                pane.text_for_word_at(&relative_position)
+                    .and_then(non_blank_text)
+            })
+    }
+
+    fn terminal_pane_id_at_position(tab: &mut Tab, position: Position) -> Result<Option<PaneId>> {
+        let Some(pane) = Self::get_pane_at(tab, &position, false)? else {
+            return Ok(None);
+        };
+        let pane_id = pane.pid();
+        if pane.position_is_on_frame(&position) || !matches!(pane_id, PaneId::Terminal(_)) {
+            return Ok(None);
+        }
+        Ok(Some(pane_id))
     }
 
     fn start_pane_resize_with_mouse(
@@ -1011,6 +1356,42 @@ impl MouseHandler {
             },
             MouseAction::StopAcmeHandleDrag { position } => {
                 Self::stop_acme_handle_drag(tab, position, client_id).with_context(err_context)
+            },
+            MouseAction::StartAcmeContextMenu { pane_id, position } => {
+                clear_hover_for_client(tab, client_id);
+                tab.set_force_render();
+                let menu = AcmeContextMenuState::new(pane_id, position, tab.size);
+                tab.acme_context_menus.insert(client_id, menu);
+                Ok(MouseEffect::default())
+            },
+            MouseAction::UpdateAcmeContextMenu { position } => {
+                let display_size = tab.size;
+                if let Some(menu) = tab.acme_context_menus.get_mut(&client_id) {
+                    if menu.update_for_mouse_position(position, display_size) {
+                        tab.set_force_render();
+                    }
+                }
+                Ok(MouseEffect::default())
+            },
+            MouseAction::FinishAcmeContextMenu { position } => {
+                let Some(mut menu) = tab.acme_context_menus.remove(&client_id) else {
+                    return Ok(MouseEffect::default());
+                };
+                menu.update_for_mouse_position(position, tab.size);
+                let action = menu.action_at(position).or_else(|| {
+                    menu.contains_position(position)
+                        .then_some(())
+                        .and(menu.selected_action)
+                });
+                if let Some(action) = action {
+                    Self::execute_acme_context_menu_action(tab, menu, action, position, client_id)
+                        .with_context(err_context)?;
+                }
+                // The menu is drawn outside pane buffers. Force the panes to repaint so the
+                // overlay cells are restored even when releasing outside the menu or running an
+                // action that does not otherwise change pane contents.
+                tab.set_force_render();
+                Ok(MouseEffect::default())
             },
             MouseAction::NewAcmePane { pane_id } => {
                 clear_hover_for_client(tab, client_id);
@@ -1615,6 +1996,18 @@ impl MouseHandler {
     }
 
     fn determine_mouse_action(event: &MouseEvent, ctx: &MouseEventContext) -> Result<MouseAction> {
+        if ctx.acme_context_menu.is_some() {
+            return Ok(match event.event_type {
+                MouseEventType::Motion => MouseAction::UpdateAcmeContextMenu {
+                    position: event.position,
+                },
+                MouseEventType::Release => MouseAction::FinishAcmeContextMenu {
+                    position: event.position,
+                },
+                _ => MouseAction::NoAction,
+            });
+        }
+
         if ctx.pane_being_resized {
             return Ok(match event.event_type {
                 MouseEventType::Motion => MouseAction::ContinueResize {
@@ -1661,6 +2054,17 @@ impl MouseHandler {
                 },
                 _ => MouseAction::NoAction,
             });
+        }
+
+        if event.right && event.event_type == MouseEventType::Press {
+            if let Some(details) = &ctx.clicked_pane {
+                if !details.on_frame && matches!(details.pane_id, PaneId::Terminal(_)) {
+                    return Ok(MouseAction::StartAcmeContextMenu {
+                        pane_id: details.pane_id,
+                        position: event.position,
+                    });
+                }
+            }
         }
 
         if event.alt {
@@ -1896,19 +2300,6 @@ impl MouseHandler {
         }
 
         if event.right {
-            if matches!(&ctx.clicked_pane, Some(details) if details.is_acme_title) {
-                return Ok(MouseAction::NoAction);
-            }
-            let Some(pane_id) = ctx.pane_id_at_position else {
-                return Ok(MouseAction::NoAction);
-            };
-            let is_active_pane = Some(pane_id) == ctx.active_pane_id;
-            if is_active_pane {
-                return Ok(MouseAction::SendToTerminal {
-                    pane_id,
-                    event: *event,
-                });
-            }
             return Ok(MouseAction::NoAction);
         }
 
@@ -2315,6 +2706,7 @@ mod tests {
             selecting_with_mouse: false,
             pane_being_moved: false,
             acme_handle_drag: None,
+            acme_context_menu: None,
             clicked_pane: None,
             advanced_mouse_actions: true,
             acme_vertical_border_hit: false,
@@ -2514,6 +2906,135 @@ mod tests {
         assert_eq!(
             MouseHandler::determine_mouse_action(&event, &context).unwrap(),
             MouseAction::NoAction
+        );
+    }
+
+    #[test]
+    fn context_menu_send_bytes_end_with_enter() {
+        assert_eq!(text_with_trailing_enter("echo hi".to_owned()), b"echo hi\r");
+        assert_eq!(
+            text_with_trailing_enter("echo hi\n".to_owned()),
+            b"echo hi\n"
+        );
+        assert_eq!(
+            text_with_trailing_enter("echo hi\r".to_owned()),
+            b"echo hi\r"
+        );
+    }
+
+    #[test]
+    fn plain_right_click_on_pane_decoration_does_not_open_context_menu() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let event = MouseEvent::new_right_press_event(position);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: true,
+            frame_intercepted: false,
+            edge: None,
+            is_acme_title: true,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::NoAction
+        );
+    }
+
+    #[test]
+    fn right_click_active_mouse_pane_opens_context_menu() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let event = MouseEvent::new_right_press_event(position);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_acme_title: false,
+            is_floating: false,
+            terminal_wants_mouse: true,
+        });
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::StartAcmeContextMenu {
+                pane_id: PaneId::Terminal(1),
+                position,
+            }
+        );
+    }
+
+    #[test]
+    fn context_menu_updates_selection_without_moving_inside_box() {
+        let mut menu = AcmeContextMenuState::new(
+            PaneId::Terminal(1),
+            Position::new(1, 1),
+            Size { cols: 80, rows: 24 },
+        );
+        let original_position = (menu.x, menu.y);
+
+        menu.update_for_mouse_position(Position::new(3, 3), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Send));
+
+        menu.update_for_mouse_position(Position::new(4, 3), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Look));
+
+        menu.update_for_mouse_position(Position::new(5, 3), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Cancel));
+    }
+
+    #[test]
+    fn context_menu_moves_after_selected_item_leaves_box() {
+        let mut menu = AcmeContextMenuState::new(
+            PaneId::Terminal(1),
+            Position::new(1, 1),
+            Size { cols: 80, rows: 24 },
+        );
+        menu.update_for_mouse_position(Position::new(3, 3), Size { cols: 80, rows: 24 });
+
+        menu.update_for_mouse_position(Position::new(10, 20), Size { cols: 80, rows: 24 });
+
+        assert_eq!((menu.x, menu.y), (19, 8));
+        assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Send));
+    }
+
+    #[test]
+    fn active_context_menu_tracks_motion_and_finishes_on_release() {
+        let mut context = mouse_event_context(false);
+        let anchor = Position::new(1, 1);
+        context.acme_context_menu = Some(AcmeContextMenuState::new(
+            PaneId::Terminal(1),
+            anchor,
+            Size { cols: 80, rows: 24 },
+        ));
+        let release_position = Position::new(1, 2);
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_right_motion_event(release_position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::UpdateAcmeContextMenu {
+                position: release_position,
+            }
+        );
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_right_release_event(release_position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::FinishAcmeContextMenu {
+                position: release_position,
+            }
         );
     }
 

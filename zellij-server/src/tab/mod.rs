@@ -10,7 +10,7 @@ mod swap_layouts;
 use crate::panes::TextPlumbPayload;
 use crate::plugins::PluginId;
 use copy_command::CopyCommand;
-use mouse_handler::AcmeHandleDragState;
+use mouse_handler::{AcmeContextMenuState, AcmeHandleDragState};
 pub use mouse_handler::{MouseEffect, MouseHandler, PaneEdge, PaneResizeState};
 use std::env::temp_dir;
 use std::net::IpAddr;
@@ -259,6 +259,7 @@ pub(crate) struct Tab {
     pub selecting_with_mouse_in_pane: Option<PaneId>, // this is only pub for the tests
     pane_being_resized_with_mouse: Option<PaneResizeState>,
     acme_handle_drag: Option<AcmeHandleDragState>,
+    acme_context_menus: HashMap<ClientId, AcmeContextMenuState>,
     link_handler: Rc<RefCell<LinkHandler>>,
     clipboard_provider: ClipboardProvider,
     // TODO: used only to focus the pane when the layout is loaded
@@ -1032,6 +1033,7 @@ impl Tab {
             selecting_with_mouse_in_pane: None,
             pane_being_resized_with_mouse: None,
             acme_handle_drag: None,
+            acme_context_menus: HashMap::new(),
             link_handler: Rc::new(RefCell::new(LinkHandler::new())),
             clipboard_provider,
             focus_pane_id: None,
@@ -2310,6 +2312,7 @@ impl Tab {
         self.connected_clients.borrow_mut().remove(&client_id);
         self.mouse_help_text_visible.remove(&client_id);
         self.mouse_last_pane_id.remove(&client_id);
+        self.acme_context_menus.remove(&client_id);
         self.last_mouse_activity_time.remove(&client_id);
         self.set_client_dimmed(client_id, false);
         self.set_force_render();
@@ -2334,6 +2337,7 @@ impl Tab {
             .remove(&client_id)
             .unwrap_or_else(|| self.default_mode_info.clone());
         self.connected_clients.borrow_mut().remove(&client_id);
+        self.acme_context_menus.remove(&client_id);
         (client_id, client_mode_info)
     }
     pub fn has_no_connected_clients(&self) -> bool {
@@ -5364,6 +5368,8 @@ impl Tab {
                 .with_context(err_context)?;
         }
 
+        MouseHandler::render_acme_context_menus(self, output, client_id_override)
+            .with_context(err_context)?;
         self.render_cursor(output);
         if output.has_rendered_assets() {
             self.hide_cursor_and_clear_display_as_needed(output);
@@ -5398,6 +5404,10 @@ impl Tab {
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         for client_id in connected_clients {
+            if self.acme_context_menus.contains_key(&client_id) {
+                output.add_post_vte_instruction_to_client(client_id, "\u{1b}[?25l");
+                continue;
+            }
             match self.get_active_terminal_cursor_position(client_id) {
                 Some((cursor_position_x, cursor_position_y, is_cursor_visible)) => {
                     let active_pane_z_index = self
