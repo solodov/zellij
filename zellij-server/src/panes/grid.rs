@@ -3291,20 +3291,30 @@ impl Grid {
         self.mark_for_rerender();
     }
     pub fn get_selected_text(&self) -> Option<String> {
-        self.text_in_selection(&self.selection)
+        self.text_for_selection(&self.selection)
     }
+
     pub fn text_in_range(&self, start: Position, end: Position) -> Option<String> {
         let mut range_selection = Selection::default();
         range_selection.set_start_and_end_positions(start, end);
-        self.text_in_selection(&range_selection)
+        self.text_for_selection(&range_selection)
     }
-    fn text_in_selection(&self, text_selection: &Selection) -> Option<String> {
-        if text_selection.is_empty() {
+
+    /// Return the word at a viewport position using the configured selection boundaries.
+    pub fn text_for_word_at(&self, position: &Position) -> Option<String> {
+        let (start, end) = self.word_around_position(position)?;
+        let mut selection = Selection::default();
+        selection.set_start_and_end_positions(start, end);
+        self.text_for_selection(&selection)
+    }
+
+    fn text_for_selection(&self, selection: &Selection) -> Option<String> {
+        if selection.is_empty() {
             return None;
         }
-        let mut selection: Vec<String> = vec![];
+        let mut selected_lines: Vec<String> = vec![];
 
-        let sorted_selection = text_selection.sorted();
+        let sorted_selection = selection.sorted();
         let (start, end) = (sorted_selection.start, sorted_selection.end);
 
         for l in sorted_selection.line_indices() {
@@ -3358,12 +3368,12 @@ impl Grid {
             }
 
             if row.is_canonical {
-                selection.push(line_selection);
+                selected_lines.push(line_selection);
             } else {
                 // rejoin wrapped lines if possible
-                match selection.last_mut() {
+                match selected_lines.last_mut() {
                     Some(previous_line) => previous_line.push_str(&line_selection),
-                    None => selection.push(line_selection),
+                    None => selected_lines.push(line_selection),
                 }
             }
         }
@@ -3371,12 +3381,12 @@ impl Grid {
         // TODO: distinguish whitespace that was output explicitly vs implicitly (e.g add_newline)
         // for example: echo "     " vs empty lines
         // for now trim after building the selection to handle whitespace in wrapped lines
-        let selection: Vec<_> = selection.iter().map(|l| l.trim_end()).collect();
+        let selected_lines: Vec<_> = selected_lines.iter().map(|l| l.trim_end()).collect();
 
-        if selection.is_empty() {
+        if selected_lines.is_empty() {
             None
         } else {
-            Some(selection.join("\n"))
+            Some(selected_lines.join("\n"))
         }
     }
     /// Return the OSC8 target URI under a viewport position.

@@ -973,6 +973,10 @@ impl Pane for TerminalPane {
         self.grid.text_for_plumbing_at(position)
     }
 
+    fn text_for_word_at(&self, position: &Position) -> Option<String> {
+        self.grid.text_for_word_at(position)
+    }
+
     fn set_frame(&mut self, _frame: bool) {
         self.frame.clear();
     }

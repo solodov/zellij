@@ -446,6 +446,10 @@ pub trait Pane {
     fn text_for_plumbing_at(&self, _position: &Position) -> Option<TextPlumbPayload> {
         None
     }
+    /// Return the word at a pane-relative position for command/menu actions.
+    fn text_for_word_at(&self, _position: &Position) -> Option<String> {
+        None
+    }
     fn set_pane_default_colors(&mut self, _fg: Option<String>, _bg: Option<String>) {}
     fn get_pane_default_colors(&self) -> (Option<String>, Option<String>) {
         (None, None)
