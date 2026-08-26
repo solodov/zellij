@@ -247,6 +247,9 @@ enum MouseAction {
         pane_id: PaneId,
         position: Position,
     },
+    SearchDown,
+    SearchUp,
+    CancelSearch,
     SendToTerminal {
         pane_id: PaneId,
         event: MouseEvent,
@@ -722,6 +725,7 @@ struct MouseEventContext {
     pane_id_at_position: Option<PaneId>,
     active_pane_id: Option<PaneId>,
     floating_visible: bool,
+    input_mode: InputMode,
     pane_being_resized: bool,
     selecting_with_mouse: bool,
     pane_being_moved: bool,
@@ -1123,10 +1127,18 @@ impl MouseHandler {
             (None, None)
         };
 
+        let input_mode = tab
+            .mode_info
+            .borrow()
+            .get(&client_id)
+            .map(|mode_info| mode_info.mode)
+            .unwrap_or(tab.default_mode_info.mode);
+
         Ok(MouseEventContext {
             pane_id_at_position,
             active_pane_id,
             floating_visible,
+            input_mode,
             pane_being_resized: tab.pane_being_resized_with_mouse.is_some(),
             selecting_with_mouse: tab.selecting_with_mouse_in_pane.is_some(),
             pane_being_moved: tab.floating_panes.pane_is_being_moved_with_mouse(),
@@ -1310,10 +1322,7 @@ impl MouseHandler {
     }
 
     fn switch_client_to_search_mode(tab: &mut Tab, client_id: ClientId) -> Result<()> {
-        let default_mode = tab
-            .default_mode_info
-            .base_mode
-            .unwrap_or(tab.default_mode_info.mode);
+        let default_mode = Self::default_client_input_mode(tab);
         let mut mode_info = tab
             .mode_info
             .borrow()
@@ -1332,6 +1341,37 @@ impl MouseHandler {
                 None,
             ))
             .context("failed to switch to search mode from context-menu look")
+    }
+
+    fn switch_client_to_base_mode(tab: &mut Tab, client_id: ClientId) -> Result<()> {
+        let default_mode = Self::default_client_input_mode(tab);
+        let base_mode = tab
+            .mode_info
+            .borrow()
+            .get(&client_id)
+            .and_then(|mode_info| mode_info.base_mode)
+            .unwrap_or(default_mode);
+        let mut mode_info = tab
+            .mode_info
+            .borrow()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| tab.default_mode_info.clone());
+        mode_info.mode = base_mode;
+        mode_info.base_mode = Some(default_mode);
+        tab.change_mode_info(mode_info, client_id);
+        tab.clear_search(client_id);
+        tab.mark_active_pane_for_rerender(client_id);
+        tab.update_input_modes()?;
+        tab.senders
+            .send_to_server(ServerInstruction::ChangeMode(client_id, base_mode, None))
+            .context("failed to cancel search mode from mouse")
+    }
+
+    fn default_client_input_mode(tab: &Tab) -> InputMode {
+        tab.default_mode_info
+            .base_mode
+            .unwrap_or(tab.default_mode_info.mode)
     }
 
     fn selected_or_word_for_menu(
@@ -1870,6 +1910,18 @@ impl MouseHandler {
             MouseAction::FocusOnHover { pane_id, position } => {
                 Self::execute_focus_on_hover(tab, pane_id, position, client_id)
             },
+            MouseAction::SearchDown => {
+                tab.search_down(client_id);
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::SearchUp => {
+                tab.search_up(client_id);
+                Ok(MouseEffect::state_changed())
+            },
+            MouseAction::CancelSearch => {
+                Self::switch_client_to_base_mode(tab, client_id)?;
+                Ok(MouseEffect::state_changed())
+            },
             MouseAction::SendToTerminal { pane_id, event } => {
                 Self::execute_send_to_terminal(tab, pane_id, event, client_id)
             },
@@ -2360,6 +2412,22 @@ impl MouseHandler {
                 },
                 _ => MouseAction::NoAction,
             });
+        }
+
+        if ctx.input_mode == InputMode::Search && event.event_type == MouseEventType::Press {
+            if let Some(details) = &ctx.clicked_pane {
+                if !details.on_frame && matches!(details.pane_id, PaneId::Terminal(_)) {
+                    if event.left {
+                        return Ok(MouseAction::SearchDown);
+                    }
+                    if event.right {
+                        return Ok(MouseAction::SearchUp);
+                    }
+                    if event.middle {
+                        return Ok(MouseAction::CancelSearch);
+                    }
+                }
+            }
         }
 
         if event.right && event.event_type == MouseEventType::Press {
@@ -3008,6 +3076,7 @@ mod tests {
             pane_id_at_position: Some(PaneId::Terminal(1)),
             active_pane_id: Some(PaneId::Terminal(1)),
             floating_visible: false,
+            input_mode: InputMode::Normal,
             pane_being_resized: false,
             selecting_with_mouse: false,
             pane_being_moved: false,
@@ -3225,6 +3294,47 @@ mod tests {
         assert_eq!(
             text_with_trailing_enter("echo hi\r".to_owned()),
             b"echo hi\r"
+        );
+    }
+
+    #[test]
+    fn search_mode_mouse_buttons_navigate_matches_on_terminal_content() {
+        let mut context = mouse_event_context(false);
+        context.input_mode = InputMode::Search;
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: false,
+            frame_intercepted: false,
+            edge: None,
+            is_acme_title: false,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+        let position = Position::new(1, 1);
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_left_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::SearchDown
+        );
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_right_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::SearchUp
+        );
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_middle_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::CancelSearch
         );
     }
 
