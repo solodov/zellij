@@ -19,7 +19,8 @@ use acme::{
     acme_geometries_after_maximizing_pane, acme_geometries_after_minimizing_pane,
     acme_geometries_after_moving_pane_to_position, acme_geometries_after_removing_pane,
     acme_geometries_after_reordering_pane, acme_geometries_after_restoring_pane_rows,
-    acme_own_line_title_boundary_segments, acme_own_line_title_pane_ids,
+    acme_geometries_after_swapping_column, acme_own_line_title_boundary_segments,
+    acme_own_line_title_pane_ids,
     acme_pane_is_maximized, acme_panes_before_own_line_title, acme_previous_line_title_pane_ids,
     acme_rows_dimension, acme_title_pane_ids, equalized_acme_row_heights, equalized_lengths,
     percent_dimension, resize_acme_column_pane, AcmeColumn, AcmePaneGeometry,
@@ -1388,6 +1389,22 @@ impl TiledPanes {
             return Ok(true);
         }
         self.reorder_acme_pane_with_position(pane_id, start_position, release_position)
+    }
+
+    /// Swap the column containing `pane_id` with its left or right neighbor.
+    pub fn swap_acme_column(&mut self, pane_id: PaneId, direction: Direction) -> Result<bool> {
+        let columns = self.acme_columns()?;
+        let viewport = *self.viewport.borrow();
+        let planned_geometries =
+            acme_geometries_after_swapping_column(&columns, pane_id, direction, viewport)?;
+        if planned_geometries.is_empty() {
+            return Ok(false);
+        }
+        self.apply_acme_geometries(planned_geometries)?;
+        self.acme_rows_before_maximize = None;
+        self.reapply_pane_frames();
+        self.set_force_render();
+        Ok(true)
     }
 
     pub fn equalize_acme_pane_rows(&mut self, target_pane_id: PaneId) -> Result<()> {

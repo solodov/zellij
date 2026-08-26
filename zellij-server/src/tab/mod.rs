@@ -5085,6 +5085,42 @@ impl Tab {
         }
     }
 
+    /// Swap the Acme column containing `pane_id` with a horizontal neighbor.
+    pub fn swap_acme_column(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        client_id: ClientId,
+    ) -> bool {
+        if self.floating_panes.panes_are_visible() {
+            return false;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.dissolve_stack_lists_for_classic_mutation();
+        match self.tiled_panes.swap_acme_column(pane_id, direction) {
+            Ok(true) => {
+                self.focus_pane_with_id(pane_id, false, false, client_id)
+                    .non_fatal();
+                self.set_should_clear_display_before_rendering();
+                self.swap_layouts.set_is_tiled_damaged();
+                true
+            },
+            Ok(false) => false,
+            Err(e) => {
+                log::error!("Failed to swap Acme column: {:#}", e);
+                self.senders
+                    .send_to_background_jobs(BackgroundJob::DisplayPaneError(
+                        vec![pane_id],
+                        e.to_string(),
+                    ))
+                    .non_fatal();
+                false
+            },
+        }
+    }
+
     pub fn equalize_acme_pane_rows(&mut self, pane_id: PaneId, client_id: ClientId) -> bool {
         if self.floating_panes.panes_are_visible() {
             return false;

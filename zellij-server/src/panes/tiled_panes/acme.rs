@@ -517,6 +517,37 @@ pub(super) fn acme_geometries_after_reordering_pane(
     Ok(planned_geometries_for_columns(columns, viewport))
 }
 
+/// Plan swapping the column containing `pane_id` with its horizontal neighbor.
+pub(super) fn acme_geometries_after_swapping_column(
+    columns: &[AcmeColumn],
+    pane_id: PaneId,
+    direction: Direction,
+    viewport: Viewport,
+) -> Result<Vec<(PaneId, PaneGeom)>> {
+    let source_column_index = columns
+        .iter()
+        .position(|column| column.contains_pane(pane_id))
+        .ok_or_else(|| anyhow!("Pane is not in an Acme column"))?;
+    let target_column_index = match direction {
+        Direction::Left => source_column_index.checked_sub(1),
+        Direction::Right => (source_column_index + 1 < columns.len()).then_some(source_column_index + 1),
+        Direction::Up | Direction::Down => None,
+    };
+    let Some(target_column_index) = target_column_index else {
+        return Ok(vec![]);
+    };
+
+    let mut columns = columns.to_vec();
+    let source_x = columns[source_column_index].x;
+    let source_cols = columns[source_column_index].cols;
+    columns[source_column_index].x = columns[target_column_index].x;
+    columns[source_column_index].cols = columns[target_column_index].cols;
+    columns[target_column_index].x = source_x;
+    columns[target_column_index].cols = source_cols;
+
+    Ok(planned_geometries_for_columns(columns, viewport))
+}
+
 pub(super) fn acme_rows_dimension(rows: usize, viewport_rows: usize) -> Dimension {
     if rows == ACME_COLLAPSED_PANE_ROWS {
         Dimension::fixed(ACME_COLLAPSED_PANE_ROWS)
@@ -1011,6 +1042,98 @@ mod tests {
             89,
             viewport,
             10,
+        )
+        .unwrap();
+
+        assert!(planned_geometries.is_empty());
+    }
+
+    #[test]
+    fn swapping_column_left_exchanges_adjacent_column_slots() {
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            rows: 12,
+            cols: 90,
+        };
+        let columns = vec![
+            AcmeColumn {
+                x: 0,
+                cols: 20,
+                pane_geometries: vec![pane_geometry(1, 0, 0, 20, 12)],
+            },
+            AcmeColumn {
+                x: 20,
+                cols: 30,
+                pane_geometries: vec![
+                    pane_geometry(2, 20, 0, 30, 4),
+                    pane_geometry(3, 20, 4, 30, 8),
+                ],
+            },
+            AcmeColumn {
+                x: 50,
+                cols: 40,
+                pane_geometries: vec![pane_geometry(4, 50, 0, 40, 12)],
+            },
+        ];
+
+        let planned_geometries = acme_geometries_after_swapping_column(
+            &columns,
+            PaneId::Terminal(2),
+            Direction::Left,
+            viewport,
+        )
+        .unwrap();
+
+        let first_column_pane = planned_geom(&planned_geometries, 1);
+        assert_eq!(first_column_pane.x, 20);
+        assert_eq!(first_column_pane.cols.as_usize(), 30);
+        assert_eq!(first_column_pane.y, 0);
+        assert_eq!(first_column_pane.rows.as_usize(), 12);
+
+        let swapped_top_pane = planned_geom(&planned_geometries, 2);
+        assert_eq!(swapped_top_pane.x, 0);
+        assert_eq!(swapped_top_pane.cols.as_usize(), 20);
+        assert_eq!(swapped_top_pane.y, 0);
+        assert_eq!(swapped_top_pane.rows.as_usize(), 4);
+
+        let swapped_bottom_pane = planned_geom(&planned_geometries, 3);
+        assert_eq!(swapped_bottom_pane.x, 0);
+        assert_eq!(swapped_bottom_pane.cols.as_usize(), 20);
+        assert_eq!(swapped_bottom_pane.y, 4);
+        assert_eq!(swapped_bottom_pane.rows.as_usize(), 8);
+
+        let untouched_pane = planned_geom(&planned_geometries, 4);
+        assert_eq!(untouched_pane.x, 50);
+        assert_eq!(untouched_pane.cols.as_usize(), 40);
+    }
+
+    #[test]
+    fn swapping_edge_column_without_neighbor_is_a_no_op() {
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            rows: 12,
+            cols: 90,
+        };
+        let columns = vec![
+            AcmeColumn {
+                x: 0,
+                cols: 45,
+                pane_geometries: vec![pane_geometry(1, 0, 0, 45, 12)],
+            },
+            AcmeColumn {
+                x: 45,
+                cols: 45,
+                pane_geometries: vec![pane_geometry(2, 45, 0, 45, 12)],
+            },
+        ];
+
+        let planned_geometries = acme_geometries_after_swapping_column(
+            &columns,
+            PaneId::Terminal(1),
+            Direction::Left,
+            viewport,
         )
         .unwrap();
 

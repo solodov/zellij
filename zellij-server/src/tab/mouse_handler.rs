@@ -158,6 +158,10 @@ enum MouseAction {
         pane_id: PaneId,
     },
     EqualizeAcmeColumns,
+    SwapAcmeColumn {
+        pane_id: PaneId,
+        direction: Direction,
+    },
     AcmeClosePane {
         pane_id: PaneId,
     },
@@ -1033,6 +1037,14 @@ impl MouseHandler {
                 tab.equalize_acme_columns(client_id);
                 Ok(MouseEffect::state_changed())
             },
+            MouseAction::SwapAcmeColumn { pane_id, direction } => {
+                clear_hover_for_client(tab, client_id);
+                if tab.swap_acme_column(pane_id, direction, client_id) {
+                    Ok(MouseEffect::state_changed())
+                } else {
+                    Ok(MouseEffect::default())
+                }
+            },
             MouseAction::AcmeClosePane { pane_id } => {
                 clear_hover_for_client(tab, client_id);
                 tab.close_pane_by_pane_id(pane_id, None)
@@ -1679,6 +1691,23 @@ impl MouseHandler {
                 return Ok(MouseAction::NoAction);
             }
 
+            if let Some(pane_id) = ctx.acme_title_button_pane_id {
+                if event.event_type == MouseEventType::Press && event.left {
+                    return Ok(MouseAction::SwapAcmeColumn {
+                        pane_id,
+                        direction: Direction::Left,
+                    });
+                }
+                if event.event_type == MouseEventType::Press && event.right {
+                    return Ok(MouseAction::SwapAcmeColumn {
+                        pane_id,
+                        direction: Direction::Right,
+                    });
+                }
+                if event.left || event.right {
+                    return Ok(MouseAction::NoAction);
+                }
+            }
             let is_left_press = event.left && event.event_type == MouseEventType::Press;
             let is_left_motion = event.left && event.event_type == MouseEventType::Motion;
 
@@ -1692,7 +1721,7 @@ impl MouseHandler {
                     return Ok(MouseAction::GroupAdd(pane_id));
                 }
             }
-            if event.right {
+            if event.right && event.event_type == MouseEventType::Press {
                 return Ok(MouseAction::Ungroup);
             }
             return Ok(MouseAction::NoAction);
@@ -2433,6 +2462,58 @@ mod tests {
             MouseAction::NewAcmeColumn {
                 pane_id: PaneId::Terminal(1),
             }
+        );
+    }
+
+    #[test]
+    fn alt_left_click_acme_title_button_swaps_column_left() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_left_press_with_alt_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::SwapAcmeColumn {
+                pane_id: PaneId::Terminal(1),
+                direction: Direction::Left,
+            }
+        );
+    }
+
+    #[test]
+    fn alt_right_click_acme_title_button_swaps_column_right() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_right_press_with_alt_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::SwapAcmeColumn {
+                pane_id: PaneId::Terminal(1),
+                direction: Direction::Right,
+            }
+        );
+    }
+
+    #[test]
+    fn alt_right_release_acme_title_button_is_ignored() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        let mut event = MouseEvent::new_right_release_event(position);
+        event.alt = true;
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+            MouseAction::NoAction
         );
     }
 
