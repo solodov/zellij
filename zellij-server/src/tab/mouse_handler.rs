@@ -44,78 +44,60 @@ pub struct MouseEffect {
     pub group_toggle: Option<PaneId>,
     pub group_add: Option<PaneId>,
     pub ungroup: bool,
+    pub suppress_scroll_mode_sync: bool,
 }
 
 impl MouseEffect {
     pub fn state_changed() -> Self {
         MouseEffect {
             state_changed: true,
-            leave_clipboard_message: false,
-            kill_session_if_no_selectable_panes: false,
-            group_toggle: None,
-            group_add: None,
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn state_changed_and_kill_session_if_no_selectable_panes() -> Self {
         MouseEffect {
             state_changed: true,
-            leave_clipboard_message: false,
             kill_session_if_no_selectable_panes: true,
-            group_toggle: None,
-            group_add: None,
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn leave_clipboard_message() -> Self {
         MouseEffect {
-            state_changed: false,
             leave_clipboard_message: true,
-            kill_session_if_no_selectable_panes: false,
-            group_toggle: None,
-            group_add: None,
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn state_changed_and_leave_clipboard_message() -> Self {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: true,
-            kill_session_if_no_selectable_panes: false,
-            group_toggle: None,
-            group_add: None,
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn group_toggle(pane_id: PaneId) -> Self {
         MouseEffect {
             state_changed: true,
-            leave_clipboard_message: false,
-            kill_session_if_no_selectable_panes: false,
             group_toggle: Some(pane_id),
-            group_add: None,
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn group_add(pane_id: PaneId) -> Self {
         MouseEffect {
             state_changed: true,
-            leave_clipboard_message: false,
-            kill_session_if_no_selectable_panes: false,
-            group_toggle: None,
             group_add: Some(pane_id),
-            ungroup: false,
+            ..Default::default()
         }
     }
     pub fn ungroup() -> Self {
         MouseEffect {
             state_changed: true,
-            leave_clipboard_message: false,
-            kill_session_if_no_selectable_panes: false,
-            group_toggle: None,
-            group_add: None,
             ungroup: true,
+            ..Default::default()
         }
+    }
+    pub fn suppress_scroll_mode_sync(mut self) -> Self {
+        self.suppress_scroll_mode_sync = true;
+        self
     }
 }
 
@@ -1756,15 +1738,19 @@ impl MouseHandler {
                         .then_some(())
                         .and(menu.selected_action)
                 });
+                let mut mouse_effect = MouseEffect::default();
                 if let Some(action) = action {
                     Self::execute_acme_context_menu_action(tab, menu, action, position, client_id)
                         .with_context(err_context)?;
+                    if action == AcmeContextMenuAction::Look {
+                        mouse_effect = MouseEffect::state_changed().suppress_scroll_mode_sync();
+                    }
                 }
                 // The menu is drawn outside pane buffers. Force the panes to repaint so the
                 // overlay cells are restored even when releasing outside the menu or running an
                 // action that does not otherwise change pane contents.
                 tab.set_force_render();
-                Ok(MouseEffect::default())
+                Ok(mouse_effect)
             },
             MouseAction::NewAcmePane { pane_id } => {
                 clear_hover_for_client(tab, client_id);
@@ -1939,15 +1925,15 @@ impl MouseHandler {
             },
             MouseAction::SearchDown => {
                 tab.search_down(client_id);
-                Ok(MouseEffect::state_changed())
+                Ok(MouseEffect::state_changed().suppress_scroll_mode_sync())
             },
             MouseAction::SearchUp => {
                 tab.search_up(client_id);
-                Ok(MouseEffect::state_changed())
+                Ok(MouseEffect::state_changed().suppress_scroll_mode_sync())
             },
             MouseAction::CancelSearch => {
                 Self::switch_client_to_base_mode(tab, client_id)?;
-                Ok(MouseEffect::state_changed())
+                Ok(MouseEffect::state_changed().suppress_scroll_mode_sync())
             },
             MouseAction::SendToTerminal { pane_id, event } => {
                 Self::execute_send_to_terminal(tab, pane_id, event, client_id)
