@@ -444,6 +444,9 @@ pub trait Pane {
     fn get_selected_text(&self, _client_id: ClientId) -> Option<String> {
         None
     }
+    fn viewport_is_at_bottom(&self) -> bool {
+        !self.is_scrolled()
+    }
     fn link_uri_at(&self, _position: &Position) -> Option<String> {
         None
     }
@@ -725,6 +728,15 @@ pub trait Pane {
     }
     fn update_search_term(&mut self, _needle: &str) {
         // No-op by default (only terminal-panes currently have search capability)
+    }
+    fn set_search_term_from_position(
+        &mut self,
+        needle: &str,
+        _position: &Position,
+        _client_id: ClientId,
+    ) {
+        self.clear_search();
+        self.update_search_term(needle);
     }
     fn search_down(&mut self) {
         // No-op by default (only terminal-panes currently have search capability)

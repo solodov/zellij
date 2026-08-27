@@ -12,6 +12,21 @@ fn is_word_boundary(x: &Option<char>) -> bool {
     x.map_or(true, |c| !c.is_ascii_alphanumeric() && c != '_')
 }
 
+fn selection_contains_position(selection: &Selection, position: Position) -> bool {
+    let Ok(line) = usize::try_from(position.line()) else {
+        return false;
+    };
+    selection.contains(line, position.column())
+}
+
+fn search_selection_matches_anchor(selection: &Selection, anchor: &Selection) -> bool {
+    let selection = selection.sorted();
+    let anchor = anchor.sorted();
+    selection == anchor
+        || selection_contains_position(&selection, anchor.start)
+        || selection_contains_position(&anchor, selection.start)
+}
+
 #[derive(Debug)]
 enum SearchSource<'a> {
     Main(&'a Row),
@@ -426,6 +441,43 @@ impl Grid {
         // We still don't want to pre-select anything at this stage
         self.search_results.active = None;
         self.is_scrolled = true;
+    }
+
+    /// Set the search string and make the match at the given selection active if visible.
+    pub fn set_search_string_with_active_selection(
+        &mut self,
+        needle: &str,
+        active_selection: Option<Selection>,
+    ) {
+        self.set_search_string(needle);
+        if let Some(active_selection) = active_selection {
+            self.activate_search_result_at_selection(active_selection);
+        }
+    }
+
+    fn activate_search_result_at_selection(&mut self, active_selection: Selection) {
+        let active_selection = active_selection.sorted();
+        let Some(active_result) = self
+            .search_results
+            .selections
+            .iter()
+            .find(|selection| search_selection_matches_anchor(selection, &active_selection))
+            .copied()
+        else {
+            return;
+        };
+
+        if let Some(previous_active) = self.search_results.active {
+            self.output_buffer.update_lines(
+                previous_active.start.line() as usize,
+                previous_active.end.line() as usize,
+            );
+        }
+        self.search_results.active = Some(active_result);
+        self.output_buffer.update_lines(
+            active_result.start.line() as usize,
+            active_result.end.line() as usize,
+        );
     }
 
     pub fn search_viewport(&mut self) {

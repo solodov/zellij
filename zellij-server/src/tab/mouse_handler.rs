@@ -1308,9 +1308,18 @@ impl MouseHandler {
                 {
                     if let Some(text) = Self::selected_or_word_for_menu(tab, menu, client_id) {
                         tab.focus_pane_with_id(target_pane_id, false, false, client_id)?;
+                        let search_anchor_position = if target_pane_id == menu.pane_id {
+                            menu.anchor_position
+                        } else {
+                            release_position
+                        };
                         if let Some(pane) = tab.get_pane_with_id_mut(target_pane_id) {
-                            pane.clear_search();
-                            pane.update_search_term(&text);
+                            let relative_position = pane.relative_position(&search_anchor_position);
+                            pane.set_search_term_from_position(
+                                &text,
+                                &relative_position,
+                                client_id,
+                            );
                         }
                         Self::switch_client_to_search_mode(tab, client_id)?;
                     }
@@ -1345,12 +1354,30 @@ impl MouseHandler {
 
     fn switch_client_to_base_mode(tab: &mut Tab, client_id: ClientId) -> Result<()> {
         let default_mode = Self::default_client_input_mode(tab);
-        let base_mode = tab
+        let configured_base_mode = tab
             .mode_info
             .borrow()
             .get(&client_id)
             .and_then(|mode_info| mode_info.base_mode)
             .unwrap_or(default_mode);
+        let (active_pane_is_scrolled, active_pane_is_at_bottom) = tab
+            .get_active_pane_or_floating_pane_mut(client_id)
+            .map(|pane| {
+                let is_scrolled = pane.is_scrolled();
+                let is_at_bottom = pane.viewport_is_at_bottom();
+                if is_at_bottom {
+                    pane.clear_scroll();
+                }
+                (is_scrolled, is_at_bottom)
+            })
+            .unwrap_or((false, true));
+        let base_mode = if active_pane_is_at_bottom {
+            default_mode
+        } else if active_pane_is_scrolled {
+            InputMode::Scroll
+        } else {
+            configured_base_mode
+        };
         let mut mode_info = tab
             .mode_info
             .borrow()

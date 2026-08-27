@@ -8,7 +8,7 @@ use crate::panes::{
     grid::{Grid, PendingNotification},
     nested_session_modal::GuestModalShortcuts,
     terminal_character::{render_first_run_banner, TerminalCharacter, EMPTY_TERMINAL_CHARACTER},
-    TextPlumbPayload,
+    Selection, TextPlumbPayload,
 };
 use crate::pty::VteBytes;
 use crate::route::NotificationEnd;
@@ -770,6 +770,9 @@ impl Pane for TerminalPane {
     fn is_scrolled(&self) -> bool {
         self.grid.is_scrolled
     }
+    fn viewport_is_at_bottom(&self) -> bool {
+        self.grid.lines_below.is_empty()
+    }
 
     fn active_at(&self) -> Instant {
         self.active_at
@@ -1080,6 +1083,22 @@ impl Pane for TerminalPane {
         }
         self.set_should_render(true);
     }
+    fn set_search_term_from_position(
+        &mut self,
+        needle: &str,
+        position: &Position,
+        _client_id: ClientId,
+    ) {
+        let active_selection = self.search_anchor_selection(position);
+        self.search_term = needle.to_owned();
+        self.grid.clear_search();
+        if !self.search_term.is_empty() {
+            self.grid
+                .set_search_string_with_active_selection(&self.search_term, active_selection);
+        }
+        self.grid.reset_selection();
+        self.set_should_render(true);
+    }
     fn search_down(&mut self) {
         if self.search_term.is_empty() {
             return; // No-op
@@ -1370,6 +1389,16 @@ impl Pane for TerminalPane {
 }
 
 impl TerminalPane {
+    fn search_anchor_selection(&self, position: &Position) -> Option<Selection> {
+        if !self.grid.selection.is_empty() {
+            return Some(self.grid.selection.sorted());
+        }
+        let (start, end) = self.grid.word_around_position(position)?;
+        let mut selection = Selection::default();
+        selection.set_start_and_end_positions(start, end);
+        Some(selection.sorted())
+    }
+
     fn title_with_bell_indicator(&self, title: String) -> String {
         if self.has_bell_notification {
             format!("{} [!]", title)
