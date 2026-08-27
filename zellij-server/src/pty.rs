@@ -13,9 +13,10 @@ use crate::{
     thread_bus::{Bus, ThreadSenders},
     ClientId, ServerInstruction,
 };
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::{collections::HashMap, path::PathBuf};
 use tokio::task::JoinHandle;
 use zellij_utils::{
     data::{
@@ -2275,25 +2276,9 @@ impl Pty {
     }
 
     fn plumb_text(&self, pane_id: PaneId, text: TextPlumbPayload) {
-        let mut command = text_plumber_command();
+        let cwd = self.cwd_for_pane_id(&pane_id);
+        let mut command = text_plumber_open_command(&text, cwd.as_deref());
         command
-            .arg("open")
-            .arg("--source")
-            .arg("zellij");
-        if let Some(click_byte_offset) = text.click_byte_offset {
-            command
-                .arg("--click-byte-offset")
-                .arg(click_byte_offset.to_string());
-        }
-        if let Some(cwd) = self.cwd_for_pane_id(&pane_id) {
-            if cwd.is_dir() {
-                command.current_dir(&cwd);
-            }
-            command.arg("--cwd").arg(cwd);
-        }
-        command
-            .arg("--")
-            .arg(text.text)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -2497,6 +2482,28 @@ impl Drop for Pty {
                 .fatal();
         }
     }
+}
+
+fn text_plumber_open_command(text: &TextPlumbPayload, cwd: Option<&Path>) -> Command {
+    let mut command = text_plumber_command();
+    command.arg("open");
+    if let Some(action) = &text.action {
+        command.arg("--action").arg(action);
+    }
+    command.arg("--source").arg("zellij");
+    if let Some(click_byte_offset) = text.click_byte_offset {
+        command
+            .arg("--click-byte-offset")
+            .arg(click_byte_offset.to_string());
+    }
+    if let Some(cwd) = cwd {
+        if cwd.is_dir() {
+            command.current_dir(cwd);
+        }
+        command.arg("--cwd").arg(cwd);
+    }
+    command.arg("--").arg(&text.text);
+    command
 }
 
 fn text_plumber_command() -> Command {

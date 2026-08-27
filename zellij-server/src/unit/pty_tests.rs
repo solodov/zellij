@@ -403,6 +403,37 @@ fn multiple_terminals_only_active_ones_polled() {
 // --- CWD change events ---
 
 #[test]
+fn text_plumber_open_command_includes_configured_action() {
+    let cwd = std::env::current_dir().unwrap();
+    let payload = TextPlumbPayload {
+        text: "MySymbol".to_owned(),
+        click_byte_offset: None,
+        action: Some("go-to-definition".to_owned()),
+    };
+
+    let command = text_plumber_open_command(&payload, Some(&cwd));
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        args,
+        vec![
+            "open".to_owned(),
+            "--action".to_owned(),
+            "go-to-definition".to_owned(),
+            "--source".to_owned(),
+            "zellij".to_owned(),
+            "--cwd".to_owned(),
+            cwd.to_string_lossy().into_owned(),
+            "--".to_owned(),
+            "MySymbol".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn cwd_changed_event_emitted_on_change() {
     let mock = MockOsApi::new();
     let child_pid = 100;

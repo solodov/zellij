@@ -3438,6 +3438,7 @@ impl Grid {
         Some(TextPlumbPayload {
             text: logical_text[..trimmed_len].to_owned(),
             click_byte_offset: Some(click_byte_offset.min(trimmed_len)),
+            action: None,
         })
     }
 

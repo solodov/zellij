@@ -28,9 +28,10 @@ pub(crate) use terminal_character::*;
 pub use terminal_pane::*;
 pub use tiled_panes::*;
 
-/// Text sent to the external plumber, with click offset when the text came from a line.
+/// Text sent to the external plumber, with optional action and click offset context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextPlumbPayload {
     pub text: String,
     pub click_byte_offset: Option<usize>,
+    pub action: Option<String>,
 }

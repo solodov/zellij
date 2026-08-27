@@ -286,7 +286,14 @@ pub(super) enum AcmeContextMenuAction {
     Put,
     Send,
     Look,
+    GoToDefinition,
     Cancel,
+}
+
+impl AcmeContextMenuAction {
+    fn is_drag_targeted(self) -> bool {
+        matches!(self, Self::Put | Self::Send | Self::Look)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,15 +314,16 @@ pub(super) enum AcmeHoverHelpTarget {
 
 const ACME_HANDLE_DRAG_THRESHOLD: usize = 1;
 const ACME_HOVER_HELP_DELAY_MS: u128 = 1400;
-const ACME_CONTEXT_MENU_LABEL_WIDTH: usize = 6;
+const ACME_CONTEXT_MENU_LABEL_WIDTH: usize = 10;
 const ACME_CONTEXT_MENU_CONTENT_WIDTH: usize = ACME_CONTEXT_MENU_LABEL_WIDTH + 2;
 const ACME_CONTEXT_MENU_WIDTH: usize = ACME_CONTEXT_MENU_CONTENT_WIDTH + 2;
-const ACME_CONTEXT_MENU_ITEM_COUNT: usize = 4;
+const ACME_CONTEXT_MENU_ITEM_COUNT: usize = 5;
 const ACME_CONTEXT_MENU_HEIGHT: usize = ACME_CONTEXT_MENU_ITEM_COUNT + 2;
 const ACME_CONTEXT_MENU_ITEMS: [(AcmeContextMenuAction, &str); ACME_CONTEXT_MENU_ITEM_COUNT] = [
     (AcmeContextMenuAction::Put, "put"),
     (AcmeContextMenuAction::Send, "send"),
     (AcmeContextMenuAction::Look, "look"),
+    (AcmeContextMenuAction::GoToDefinition, "definition"),
     (AcmeContextMenuAction::Cancel, "cancel"),
 ];
 
@@ -340,12 +348,16 @@ impl AcmeContextMenuState {
         if self.contains_position(position) {
             if let Some(action) = self.action_at(position) {
                 self.selected_action = Some(action);
-                self.drag_offset = Some((
-                    position.column().saturating_sub(self.x),
-                    usize::try_from(position.line())
-                        .unwrap_or_default()
-                        .saturating_sub(self.y),
-                ));
+                if action.is_drag_targeted() {
+                    self.drag_offset = Some((
+                        position.column().saturating_sub(self.x),
+                        usize::try_from(position.line())
+                            .unwrap_or_default()
+                            .saturating_sub(self.y),
+                    ));
+                } else {
+                    self.drag_offset = None;
+                }
             }
         } else if let Some((offset_x, offset_y)) = self.drag_offset {
             self.x = position
@@ -356,9 +368,22 @@ impl AcmeContextMenuState {
                 .unwrap_or_default()
                 .saturating_sub(offset_y)
                 .min(display_size.rows.saturating_sub(ACME_CONTEXT_MENU_HEIGHT));
-            self.selected_action = self.action_at(position);
+            self.selected_action = self
+                .action_at(position)
+                .filter(|action| action.is_drag_targeted())
+                .or(self
+                    .selected_action
+                    .filter(|action| action.is_drag_targeted()));
+        } else {
+            self.selected_action = None;
         }
         *self != previous
+    }
+
+    fn action_for_release(&self, position: Position) -> Option<AcmeContextMenuAction> {
+        self.selected_action
+            .filter(|action| action.is_drag_targeted())
+            .or_else(|| self.action_at(position))
     }
 
     fn contains_position(&self, position: Position) -> bool {
@@ -1307,6 +1332,20 @@ impl MouseHandler {
                     }
                 }
             },
+            AcmeContextMenuAction::GoToDefinition => {
+                if let Some(text) = Self::selected_or_word_for_menu(tab, menu, client_id) {
+                    tab.senders
+                        .send_to_pty(PtyInstruction::PlumbText {
+                            pane_id: menu.pane_id,
+                            text: TextPlumbPayload {
+                                text,
+                                click_byte_offset: None,
+                                action: Some("go-to-definition".to_owned()),
+                            },
+                        })
+                        .context("failed to plumb context-menu definition lookup")?;
+                }
+            },
             AcmeContextMenuAction::Cancel => {},
         }
         Ok(())
@@ -1733,11 +1772,7 @@ impl MouseHandler {
                     return Ok(MouseEffect::default());
                 };
                 menu.update_for_mouse_position(position, tab.size);
-                let action = menu.action_at(position).or_else(|| {
-                    menu.contains_position(position)
-                        .then_some(())
-                        .and(menu.selected_action)
-                });
+                let action = menu.action_for_release(position);
                 let mut mouse_effect = MouseEffect::default();
                 if let Some(action) = action {
                     Self::execute_acme_context_menu_action(tab, menu, action, position, client_id)
@@ -1808,6 +1843,7 @@ impl MouseHandler {
                     .map(|uri| TextPlumbPayload {
                         text: uri,
                         click_byte_offset: None,
+                        action: None,
                     })
                     .or_else(|| pane.text_for_plumbing_at(&relative_position));
                 if let Some(text) = text {
@@ -3416,7 +3452,38 @@ mod tests {
 
         menu.update_for_mouse_position(Position::new(5, 3), Size { cols: 80, rows: 24 });
         assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(
+            menu.selected_action,
+            Some(AcmeContextMenuAction::GoToDefinition)
+        );
+        assert_eq!(menu.drag_offset, None);
+
+        menu.update_for_mouse_position(Position::new(6, 3), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
         assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Cancel));
+        assert_eq!(menu.drag_offset, None);
+    }
+
+    #[test]
+    fn context_menu_definition_does_not_drag_menu_or_persist_selection() {
+        let mut menu = AcmeContextMenuState::new(
+            PaneId::Terminal(1),
+            Position::new(1, 1),
+            Size { cols: 80, rows: 24 },
+        );
+        let original_position = (menu.x, menu.y);
+
+        menu.update_for_mouse_position(Position::new(5, 3), Size { cols: 80, rows: 24 });
+        assert_eq!(
+            menu.selected_action,
+            Some(AcmeContextMenuAction::GoToDefinition)
+        );
+        assert_eq!(menu.drag_offset, None);
+
+        menu.update_for_mouse_position(Position::new(10, 20), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, None);
+        assert_eq!(menu.action_for_release(Position::new(10, 20)), None);
     }
 
     #[test]
