@@ -42,6 +42,10 @@ const TABSTOP_WIDTH: usize = 8; // TODO: is this always right?
 pub const MAX_TITLE_STACK_SIZE: usize = 1000;
 // Acme-like selection uses a soft background while preserving foreground colors.
 const TEXT_SELECTION_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xed, 0xee, 0xa6));
+const SEARCH_MATCH_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xf3, 0xea, 0xff));
+const SEARCH_MATCH_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x5b, 0x3a, 0x77));
+const ACTIVE_SEARCH_MATCH_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0x91, 0x61, 0xc9));
+const ACTIVE_SEARCH_MATCH_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xff, 0xf8, 0xe8));
 
 const BASE64_DECODER: GeneralPurpose = GeneralPurpose::new(
     &BASE64_STANDARD_ALPHABET,
@@ -2089,26 +2093,15 @@ impl Grid {
             } else if !self.search_results.selections.is_empty() {
                 for res in self.search_results.selections.iter() {
                     if res.contains_row(character_chunk.y.saturating_sub(content_y)) {
-                        let (select_background_palette, select_foreground_palette) =
+                        let (background_color, foreground_color) =
                             if Some(res) == self.search_results.active.as_ref() {
                                 (
-                                    style.colors.text_unselected.emphasis_0,
-                                    style.colors.text_unselected.background,
+                                    ACTIVE_SEARCH_MATCH_BACKGROUND,
+                                    ACTIVE_SEARCH_MATCH_FOREGROUND,
                                 )
                             } else {
-                                (
-                                    style.colors.text_unselected.emphasis_2,
-                                    style.colors.text_unselected.background,
-                                )
+                                (SEARCH_MATCH_BACKGROUND, SEARCH_MATCH_FOREGROUND)
                             };
-                        let background_color = match select_background_palette {
-                            PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
-                            PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
-                        };
-                        let foreground_color = match select_foreground_palette {
-                            PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
-                            PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
-                        };
                         character_chunk.add_selection_and_colors(
                             HighlightSelection {
                                 selection: *res,
