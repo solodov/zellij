@@ -539,7 +539,7 @@ impl Pane for TerminalPane {
             && frame_params.is_main_client
             && self.search_term.is_empty()
         {
-            String::from("Enter search...")
+            String::from("look...")
         } else if (input_mode == InputMode::EnterSearch || input_mode == InputMode::Search)
             && !self.search_term.is_empty()
         {
@@ -548,18 +548,18 @@ impl Pane for TerminalPane {
                 let mut modifiers = Vec::new();
                 modifier_text.push_str(" [");
                 if self.grid.search_results.case_insensitive {
-                    modifiers.push("c")
+                    modifiers.push("nocase")
                 }
                 if self.grid.search_results.whole_word_only {
-                    modifiers.push("o")
+                    modifiers.push("word")
                 }
                 if self.grid.search_results.wrap_search {
-                    modifiers.push("w")
+                    modifiers.push("wrap")
                 }
-                modifier_text.push_str(&modifiers.join(", "));
+                modifier_text.push_str(&modifiers.join(" "));
                 modifier_text.push(']');
             }
-            format!("SEARCHING: {}{}", self.search_term, modifier_text)
+            format!("look: {}{}", self.search_term, modifier_text)
         } else {
             self.current_title()
         };
