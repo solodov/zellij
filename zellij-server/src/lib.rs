@@ -15,6 +15,7 @@ pub mod background_jobs;
 mod global_async_runtime;
 mod logging_pipe;
 mod mobile_web;
+mod mouse_positioner;
 pub mod nested_guest;
 pub mod notifications;
 mod pane_groups;

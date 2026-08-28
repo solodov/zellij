@@ -1792,6 +1792,7 @@ pub(crate) struct Screen {
     focus_follows_mouse: bool,
     mouse_click_through: bool,
     acme_tab_drag: Option<AcmeTabDragState>,
+    pending_acme_tab_control_square_mouse_origins: HashMap<ClientId, Position>,
     tab_id_being_renamed: BTreeMap<ClientId, usize>,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     // the below are the configured values - the ones that will be set if and when the web server
@@ -2068,6 +2069,7 @@ impl Screen {
             focus_follows_mouse,
             mouse_click_through,
             acme_tab_drag: None,
+            pending_acme_tab_control_square_mouse_origins: HashMap::new(),
             tab_id_being_renamed: BTreeMap::new(),
             web_server_ip,
             web_server_port,
@@ -4709,7 +4711,7 @@ impl Screen {
             AcmeTabBarHitTarget::TabSquare { tab_id, position } => {
                 // Ctrl-right creates the next tab, matching rightward Acme column creation.
                 if event.ctrl && event.right {
-                    self.request_new_acme_tab(client_id)?;
+                    self.request_new_acme_tab(client_id, event.position)?;
                     return Ok(true);
                 }
                 if event.middle {
@@ -4805,7 +4807,7 @@ impl Screen {
         Ok(())
     }
 
-    fn request_new_acme_tab(&mut self, client_id: ClientId) -> Result<()> {
+    fn request_new_acme_tab(&mut self, client_id: ClientId, mouse_origin: Position) -> Result<()> {
         let is_web_client = self.client_is_web(client_id);
         self.bus.senders.send_to_screen(ScreenInstruction::NewTab(
             None,
@@ -4819,7 +4821,30 @@ impl Screen {
             true,
             (client_id, is_web_client),
             None,
-        ))
+        ))?;
+        self.pending_acme_tab_control_square_mouse_origins
+            .insert(client_id, mouse_origin);
+        Ok(())
+    }
+
+    fn move_mouse_to_new_acme_tab_control_square(
+        &mut self,
+        client_id: ClientId,
+        tab_id: usize,
+        pane_id: Option<PaneId>,
+    ) {
+        let Some(mouse_origin) = self
+            .pending_acme_tab_control_square_mouse_origins
+            .remove(&client_id)
+        else {
+            return;
+        };
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.move_mouse_from_position_to_pane_control_square(pane_id, mouse_origin);
+        }
     }
 
     pub fn render_to_clients(&mut self) -> Result<()> {
@@ -5857,6 +5882,8 @@ impl Screen {
             self.push_sixel_host_support_to_tabs();
         }
         self.client_sizes.remove(&client_id);
+        self.pending_acme_tab_control_square_mouse_origins
+            .remove(&client_id);
         self.pane_render_subscribers.remove(&client_id);
         self.client_host_focused.remove(&client_id);
         self.client_notification_protocols.remove(&client_id);
@@ -10640,6 +10667,24 @@ pub(crate) fn screen_thread_main(
                             pending_tab_switches.insert((tab_position, client_id_to_switch));
                         }
                     }
+                }
+
+                if should_change_focus_to_new_tab {
+                    let first_pane_id = new_pane_pids
+                        .first()
+                        .map(|(terminal_id, _)| PaneId::Terminal(*terminal_id))
+                        .or_else(|| {
+                            new_plugin_ids
+                                .values()
+                                .flat_map(|plugin_ids| plugin_ids.iter())
+                                .min()
+                                .map(|plugin_id| PaneId::Plugin(*plugin_id))
+                        });
+                    screen.move_mouse_to_new_acme_tab_control_square(
+                        client_id,
+                        tab_id,
+                        first_pane_id,
+                    );
                 }
 
                 for plugin_ids in new_plugin_ids.values() {

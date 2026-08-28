@@ -151,7 +151,10 @@ enum MouseAction {
     EqualizeAcmePaneRows {
         pane_id: PaneId,
     },
-    EqualizeAcmeColumns,
+    EqualizeAcmeColumns {
+        pane_id: PaneId,
+        edge: PaneEdge,
+    },
     SwapAcmeColumn {
         pane_id: PaneId,
         direction: Direction,
@@ -1269,7 +1272,12 @@ impl MouseHandler {
             }
         } else {
             tab.focus_pane_with_id(drag_state.pane_id, false, false, client_id)?;
-            tab.acme_toggle_title_button_pane(client_id);
+            if tab.acme_toggle_title_button_pane(client_id) {
+                tab.move_mouse_from_position_to_pane_control_square(
+                    drag_state.pane_id,
+                    position,
+                );
+            }
             Ok(MouseEffect::state_changed())
         }
     }
@@ -1790,27 +1798,40 @@ impl MouseHandler {
             MouseAction::NewAcmePane { pane_id } => {
                 clear_hover_for_client(tab, client_id);
                 tab.focus_pane_with_id(pane_id, false, false, client_id)?;
-                tab.spawn_acme_pane_for_client(client_id)?;
+                tab.spawn_acme_pane_for_client(client_id, event.position)?;
                 Ok(MouseEffect::state_changed())
             },
             MouseAction::NewAcmeColumn { pane_id } => {
                 clear_hover_for_client(tab, client_id);
                 tab.focus_pane_with_id(pane_id, false, false, client_id)?;
-                tab.spawn_acme_column_for_client(client_id)?;
+                tab.spawn_acme_column_for_client(client_id, event.position)?;
                 Ok(MouseEffect::state_changed())
             },
             MouseAction::EqualizeAcmePaneRows { pane_id } => {
                 let hover_cleared = clear_hover_for_client(tab, client_id);
-                if tab.equalize_acme_pane_rows(pane_id, client_id) || hover_cleared {
+                if tab.equalize_acme_pane_rows(pane_id, client_id) {
+                    tab.move_mouse_from_position_to_pane_title(pane_id, event.position);
+                    Ok(MouseEffect::state_changed())
+                } else if hover_cleared {
                     Ok(MouseEffect::state_changed())
                 } else {
                     Ok(MouseEffect::default())
                 }
             },
-            MouseAction::EqualizeAcmeColumns => {
-                clear_hover_for_client(tab, client_id);
-                tab.equalize_acme_columns(client_id);
-                Ok(MouseEffect::state_changed())
+            MouseAction::EqualizeAcmeColumns { pane_id, edge } => {
+                let hover_cleared = clear_hover_for_client(tab, client_id);
+                if tab.equalize_acme_columns(client_id) {
+                    tab.move_mouse_from_position_to_pane_vertical_border(
+                        pane_id,
+                        event.position,
+                        edge,
+                    );
+                    Ok(MouseEffect::state_changed())
+                } else if hover_cleared {
+                    Ok(MouseEffect::state_changed())
+                } else {
+                    Ok(MouseEffect::default())
+                }
             },
             MouseAction::SwapAcmeColumn { pane_id, direction } => {
                 clear_hover_for_client(tab, client_id);
@@ -2612,7 +2633,13 @@ impl MouseHandler {
             };
             if details.on_frame {
                 if ctx.acme_vertical_border_hit {
-                    return Ok(MouseAction::EqualizeAcmeColumns);
+                    if let Some(edge) = details.edge {
+                        return Ok(MouseAction::EqualizeAcmeColumns {
+                            pane_id: details.pane_id,
+                            edge,
+                        });
+                    }
+                    return Ok(MouseAction::NoAction);
                 }
                 if details.frame_intercepted {
                     return Ok(MouseAction::FrameIntercepted {

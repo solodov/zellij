@@ -55,7 +55,7 @@ use zellij_utils::{
         options::PaneFrameStyle,
     },
     pane_size::{Offset, PaneGeom, Size, SizeInPixels, Viewport},
-    position::Position,
+    position::{Column, Line, Position},
 };
 
 use std::{
@@ -4094,6 +4094,52 @@ impl TiledPanes {
         } else {
             None
         }
+    }
+
+    /// Return the screen-cell position of an Acme pane's title button.
+    pub fn acme_title_button_position(&self, pane_id: PaneId) -> Option<Position> {
+        let (title_y, left, right) = self.acme_title_line_and_column_bounds(pane_id)?;
+        Some(Position {
+            line: Line(title_y as isize),
+            column: Column(
+                left.saturating_add(ACME_TITLE_BUTTON_COLUMN_OFFSET)
+                    .clamp(left, right),
+            ),
+        })
+    }
+
+    /// Return the screen-cell position of an Acme pane's title at this column.
+    pub fn acme_title_position_at_column(
+        &self,
+        pane_id: PaneId,
+        column: usize,
+    ) -> Option<Position> {
+        let (title_y, left, right) = self.acme_title_line_and_column_bounds(pane_id)?;
+        Some(Position {
+            line: Line(title_y as isize),
+            column: Column(column.clamp(left, right)),
+        })
+    }
+
+    fn acme_title_line_and_column_bounds(&self, pane_id: PaneId) -> Option<(usize, usize, usize)> {
+        if !self.pane_frame_style.draws_titles() {
+            return None;
+        }
+        let columns = self.acme_columns().ok()?;
+        let previous_line_title_pane_ids = acme_previous_line_title_pane_ids(&columns);
+        let pane_geometry = columns
+            .iter()
+            .flat_map(|column| column.pane_geometries.iter())
+            .find(|pane_geometry| pane_geometry.pane_id == pane_id)?;
+        let title_y = if previous_line_title_pane_ids.contains(&pane_id) {
+            pane_geometry.geom.y.saturating_sub(1)
+        } else {
+            pane_geometry.geom.y
+        };
+        let left = pane_geometry.geom.x;
+        let right = left.checked_add(pane_geometry.geom.cols.as_usize().checked_sub(1)?)?;
+
+        Some((title_y, left, right))
     }
 
     /// Return the resize edge represented by an Acme pane title at this position.

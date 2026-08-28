@@ -225,6 +225,13 @@ enum BufferedTabInstruction {
     HoldPane(PaneId, Option<i32>, bool, RunCommand), // Option<i32> is the exit status, bool is is_first_run
 }
 
+#[derive(Clone, Copy)]
+enum AcmeMouseMoveTarget {
+    PaneControlSquare,
+    PaneTitle,
+    PaneVerticalBorder { edge: PaneEdge },
+}
+
 pub(crate) struct Tab {
     pub id: usize,
     pub position: usize,
@@ -293,6 +300,7 @@ pub(crate) struct Tab {
     dimmed_clients: HashSet<ClientId>,
     plugin_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_last_pane_id: HashMap<ClientId, PaneId>,
+    pending_acme_pane_control_square_mouse_origins: HashMap<ClientId, Position>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
     acme_hover_help: HashMap<ClientId, AcmeHoverHelpState>,
     last_mouse_activity_time: HashMap<ClientId, Instant>,
@@ -1074,6 +1082,7 @@ impl Tab {
             mouse_hover_pane_id: HashMap::new(),
             plugin_hover_pane_id: HashMap::new(),
             mouse_last_pane_id: HashMap::new(),
+            pending_acme_pane_control_square_mouse_origins: HashMap::new(),
             mouse_help_text_visible: HashMap::new(),
             acme_hover_help: HashMap::new(),
             last_mouse_activity_time: HashMap::new(),
@@ -2329,6 +2338,8 @@ impl Tab {
         self.mouse_help_text_visible.remove(&client_id);
         self.acme_hover_help.remove(&client_id);
         self.mouse_last_pane_id.remove(&client_id);
+        self.pending_acme_pane_control_square_mouse_origins
+            .remove(&client_id);
         self.acme_context_menus.remove(&client_id);
         self.last_mouse_activity_time.remove(&client_id);
         self.set_client_dimmed(client_id, false);
@@ -2523,8 +2534,22 @@ impl Tab {
         client_id: Option<ClientId>,
         blocking_notification: Option<NotificationEnd>,
     ) -> Result<()> {
+        let pending_acme_mouse_origin = if should_focus_pane
+            && !start_suppressed
+            && matches!(
+                &new_pane_placement,
+                NewPanePlacement::AcmeColumn | NewPanePlacement::AcmePane
+            )
+        {
+            client_id.and_then(|client_id| {
+                self.pending_acme_pane_control_square_mouse_origins
+                    .remove(&client_id)
+            })
+        } else {
+            None
+        };
         let invoked_with = self.normalize_invoked_with_for_default_shell(invoked_with);
-        match new_pane_placement {
+        let new_pane_result = match new_pane_placement {
             NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(
                 pid,
                 initial_pane_title,
@@ -2669,8 +2694,154 @@ impl Tab {
                 blocking_notification,
                 borderless,
             ),
+        };
+        new_pane_result?;
+        if let Some(mouse_origin) = pending_acme_mouse_origin {
+            self.move_mouse_from_position_to_pane_control_square(pid, mouse_origin);
         }
+        Ok(())
     }
+
+    pub(crate) fn move_mouse_from_position_to_pane_control_square(
+        &mut self,
+        pane_id: PaneId,
+        origin: Position,
+    ) {
+        self.move_mouse_to_pane_from_position(
+            pane_id,
+            origin,
+            AcmeMouseMoveTarget::PaneControlSquare,
+        );
+    }
+
+    fn move_mouse_from_position_to_pane_title(
+        &mut self,
+        pane_id: PaneId,
+        origin: Position,
+    ) {
+        self.move_mouse_to_pane_from_position(
+            pane_id,
+            origin,
+            AcmeMouseMoveTarget::PaneTitle,
+        );
+    }
+
+    fn move_mouse_from_position_to_pane_vertical_border(
+        &mut self,
+        pane_id: PaneId,
+        origin: Position,
+        edge: PaneEdge,
+    ) {
+        self.move_mouse_to_pane_from_position(
+            pane_id,
+            origin,
+            AcmeMouseMoveTarget::PaneVerticalBorder { edge },
+        );
+    }
+
+    fn move_mouse_to_pane_from_position(
+        &mut self,
+        pane_id: PaneId,
+        origin: Position,
+        mouse_move_target: AcmeMouseMoveTarget,
+    ) {
+        let target = match mouse_move_target {
+            AcmeMouseMoveTarget::PaneControlSquare => self
+                .tiled_panes
+                .acme_title_button_position(pane_id)
+                .or_else(|| self.target_mouse_position_at_pane_center(pane_id)),
+            AcmeMouseMoveTarget::PaneTitle => self
+                .tiled_panes
+                .acme_title_position_at_column(pane_id, origin.column())
+                .or_else(|| self.target_mouse_position_at_pane_y_center(pane_id, origin)),
+            AcmeMouseMoveTarget::PaneVerticalBorder { edge } => {
+                self.target_mouse_position_on_pane_vertical_border(pane_id, origin, edge)
+            },
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.move_mouse_to_position(origin, target);
+    }
+
+    fn move_mouse_to_position(&mut self, origin: Position, target: Position) {
+        let Some(cell_size) = *self.character_cell_size.borrow() else {
+            return;
+        };
+
+        let dx =
+            (target.column() as isize - origin.column() as isize) * cell_size.width as isize;
+        let dy = (target.line() - origin.line()) * cell_size.height as isize;
+
+        crate::mouse_positioner::move_mouse_by(dx, dy);
+    }
+
+    fn target_mouse_position_at_pane_center(&self, pane_id: PaneId) -> Option<Position> {
+        let pane = self.get_pane_with_id(pane_id)?;
+        let columns = pane.get_content_columns();
+        let rows = pane.get_content_rows();
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+
+        Some(Position {
+            line: Line((pane.get_content_y() + (rows - 1) / 2) as isize),
+            column: Column(pane.get_content_x() + (columns - 1) / 2),
+        })
+    }
+
+    fn target_mouse_position_at_pane_y_center(
+        &self,
+        pane_id: PaneId,
+        origin: Position,
+    ) -> Option<Position> {
+        let pane = self.get_pane_with_id(pane_id)?;
+        let columns = pane.get_content_columns();
+        let rows = pane.get_content_rows();
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+        let left = pane.get_content_x();
+        let right = left.checked_add(columns.checked_sub(1)?)?;
+
+        Some(Position {
+            line: Line((pane.get_content_y() + (rows - 1) / 2) as isize),
+            column: Column(origin.column().clamp(left, right)),
+        })
+    }
+
+    fn target_mouse_position_on_pane_vertical_border(
+        &self,
+        pane_id: PaneId,
+        origin: Position,
+        edge: PaneEdge,
+    ) -> Option<Position> {
+        let pane = self.get_pane_with_id(pane_id)?;
+        let (left, right_exclusive) = match edge {
+            PaneEdge::Left | PaneEdge::TopLeft | PaneEdge::BottomLeft => {
+                (pane.x(), pane.get_content_x())
+            },
+            PaneEdge::Right | PaneEdge::TopRight | PaneEdge::BottomRight => {
+                let left = pane.get_content_x().checked_add(pane.get_content_columns())?;
+                let right_exclusive = pane.x().checked_add(pane.cols())?;
+                (left, right_exclusive)
+            },
+            PaneEdge::Top | PaneEdge::Bottom => return None,
+        };
+        let width = right_exclusive.checked_sub(left)?;
+        if width == 0 {
+            return None;
+        }
+        let top = pane.y();
+        let bottom = top.checked_add(pane.rows().checked_sub(1)?)?;
+        let origin_row = origin.line().max(0) as usize;
+
+        Some(Position {
+            line: Line(origin_row.clamp(top, bottom) as isize),
+            column: Column(left + (width - 1) / 2),
+        })
+    }
+
     pub fn new_no_preference_pane(
         &mut self,
         pid: PaneId,
@@ -4982,7 +5153,11 @@ impl Tab {
     }
 
     /// Spawn a new terminal as an Acme column after the focused column.
-    pub fn spawn_acme_column_for_client(&self, client_id: ClientId) -> Result<()> {
+    pub fn spawn_acme_column_for_client(
+        &mut self,
+        client_id: ClientId,
+        mouse_origin: Position,
+    ) -> Result<()> {
         self.senders
             .send_to_pty(PtyInstruction::SpawnTerminal(
                 Some(self.default_shell_terminal_action()),
@@ -4993,11 +5168,18 @@ impl Tab {
                 None,
                 false,
             ))
-            .context("failed to request new Acme column")
+            .context("failed to request new Acme column")?;
+        self.pending_acme_pane_control_square_mouse_origins
+            .insert(client_id, mouse_origin);
+        Ok(())
     }
 
     /// Spawn a new terminal as an Acme pane below the focused pane.
-    pub fn spawn_acme_pane_for_client(&self, client_id: ClientId) -> Result<()> {
+    pub fn spawn_acme_pane_for_client(
+        &mut self,
+        client_id: ClientId,
+        mouse_origin: Position,
+    ) -> Result<()> {
         self.senders
             .send_to_pty(PtyInstruction::SpawnTerminal(
                 Some(self.default_shell_terminal_action()),
@@ -5008,7 +5190,10 @@ impl Tab {
                 None,
                 false,
             ))
-            .context("failed to request new Acme pane")
+            .context("failed to request new Acme pane")?;
+        self.pending_acme_pane_control_square_mouse_origins
+            .insert(client_id, mouse_origin);
+        Ok(())
     }
 
     pub fn acme_maximize_pane(&mut self, client_id: ClientId) {
@@ -5039,16 +5224,16 @@ impl Tab {
         }
     }
 
-    pub fn acme_toggle_title_button_pane(&mut self, client_id: ClientId) {
+    pub fn acme_toggle_title_button_pane(&mut self, client_id: ClientId) -> bool {
         if self.floating_panes.panes_are_visible() {
-            return;
+            return false;
         }
         if self.tiled_panes.fullscreen_is_active() {
             self.tiled_panes.unset_fullscreen();
         }
         self.dissolve_stack_lists_for_classic_mutation();
         let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) else {
-            return;
+            return false;
         };
         match self
             .tiled_panes
@@ -5057,6 +5242,7 @@ impl Tab {
             Ok(()) => {
                 self.set_should_clear_display_before_rendering();
                 self.swap_layouts.set_is_tiled_damaged();
+                true
             },
             Err(e) => {
                 log::error!("Failed to toggle Acme title button pane: {:#}", e);
@@ -5066,6 +5252,7 @@ impl Tab {
                         e.to_string(),
                     ))
                     .non_fatal();
+                false
             },
         }
     }
@@ -5176,9 +5363,9 @@ impl Tab {
         }
     }
 
-    pub fn equalize_acme_columns(&mut self, client_id: ClientId) {
+    pub fn equalize_acme_columns(&mut self, client_id: ClientId) -> bool {
         if self.floating_panes.panes_are_visible() {
-            return;
+            return false;
         }
         if self.tiled_panes.fullscreen_is_active() {
             self.tiled_panes.unset_fullscreen();
@@ -5189,6 +5376,7 @@ impl Tab {
             Ok(()) => {
                 self.set_should_clear_display_before_rendering();
                 self.swap_layouts.set_is_tiled_damaged();
+                true
             },
             Err(e) => {
                 log::error!("Failed to equalize Acme columns: {:#}", e);
@@ -5200,6 +5388,7 @@ impl Tab {
                         ))
                         .non_fatal();
                 }
+                false
             },
         }
     }
@@ -8208,6 +8397,7 @@ impl Tab {
         self.mouse_hover_pane_id.clear();
         self.plugin_hover_pane_id.clear();
         self.mouse_last_pane_id.clear();
+        self.pending_acme_pane_control_square_mouse_origins.clear();
         self.mouse_help_text_visible.clear();
         self.acme_hover_help.clear();
     }
