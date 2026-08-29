@@ -759,6 +759,14 @@ impl TestSession {
             self.send_stdin(&keys::ctrl('q'));
             self.main_client.join();
         }
+        self.wait_for_exit();
+    }
+
+    /// Waits for a session that should already be exiting to release its client and server threads.
+    pub fn wait_for_exit(&mut self) {
+        if self.main_client.thread.is_some() {
+            self.main_client.join();
+        }
         if let Some(server_thread) = self.server_thread.lock().unwrap().take() {
             join_server_thread_with_timeout(server_thread);
         }

@@ -655,6 +655,7 @@ pub enum BackgroundJobContext {
     StopPluginLoadingAnimation,
     ReportSessionInfo,
     ReportLayoutInfo,
+    ForgetSessionState,
     RunCommand,
     WebRequest,
     ReportPluginList,

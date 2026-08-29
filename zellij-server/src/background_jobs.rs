@@ -20,7 +20,7 @@ use isahc::prelude::*;
 use isahc::AsyncReadResponseExt;
 use isahc::{config::RedirectPolicy, HttpClient, Request};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,6 +45,7 @@ pub enum BackgroundJob {
     ReportSessionInfo(String, SessionInfo),               // String - session name
     ReportPluginList(BTreeMap<PluginId, RunPlugin>),      // String - session name
     ReportLayoutInfo((String, BTreeMap<String, String>)), // BTreeMap<file_name, pane_contents>
+    ForgetSessionState(String), // session name whose resurrection cache should be deleted
     RunCommand(
         PluginId,
         ClientId,
@@ -95,6 +96,7 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             },
             BackgroundJob::ReportSessionInfo(..) => BackgroundJobContext::ReportSessionInfo,
             BackgroundJob::ReportLayoutInfo(..) => BackgroundJobContext::ReportLayoutInfo,
+            BackgroundJob::ForgetSessionState(..) => BackgroundJobContext::ForgetSessionState,
             BackgroundJob::RunCommand(..) => BackgroundJobContext::RunCommand,
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
@@ -162,6 +164,7 @@ pub(crate) fn background_jobs_main(
     let current_session_plugin_list: Arc<Mutex<BTreeMap<PluginId, RunPlugin>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
     let current_session_layout = Arc::new(Mutex::new((String::new(), BTreeMap::new())));
+    let forgotten_session_names = Arc::new(Mutex::new(HashSet::new()));
 
     let _ = SESSION_SCAN_STATE.set(SessionScanState {
         current_session_name: current_session_name.clone(),
@@ -223,6 +226,7 @@ pub(crate) fn background_jobs_main(
         let current_session_name = current_session_name.clone();
         let current_session_info = current_session_info.clone();
         let current_session_layout = current_session_layout.clone();
+        let forgotten_session_names = forgotten_session_names.clone();
         runtime.spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
                 SESSION_METADATA_WRITE_INTERVAL_MS,
@@ -236,6 +240,10 @@ pub(crate) fn background_jobs_main(
                 }
                 let info = current_session_info.lock().unwrap().clone();
                 let layout = current_session_layout.lock().unwrap().clone();
+                let forgotten_session_names = forgotten_session_names.lock().unwrap();
+                if forgotten_session_names.contains(&name) {
+                    continue;
+                }
                 write_session_state_to_disk(name, info, layout);
             }
         });
@@ -314,6 +322,16 @@ pub(crate) fn background_jobs_main(
                 let _ = bus
                     .senders
                     .send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
+            },
+            BackgroundJob::ForgetSessionState(session_name) => {
+                forget_session_state(
+                    &session_name,
+                    &current_session_name,
+                    &current_session_info,
+                    &current_session_layout,
+                    &current_session_plugin_list,
+                    &forgotten_session_names,
+                );
             },
             BackgroundJob::RunCommand(
                 plugin_id,
@@ -834,6 +852,36 @@ fn file_content_changed(path: &std::path::Path, new_content: &[u8]) -> bool {
     match std::fs::read(path) {
         Ok(existing) => existing != new_content,
         Err(_) => true,
+    }
+}
+
+/// Deletes a session's persisted resurrection state and prevents stale cached state rewrites.
+fn forget_session_state(
+    session_name: &str,
+    current_session_name: &Arc<Mutex<String>>,
+    current_session_info: &Arc<Mutex<SessionInfo>>,
+    current_session_layout: &Arc<Mutex<(String, BTreeMap<String, String>)>>,
+    current_session_plugin_list: &Arc<Mutex<BTreeMap<PluginId, RunPlugin>>>,
+    forgotten_session_names: &Arc<Mutex<HashSet<String>>>,
+) {
+    let mut forgotten_session_names = forgotten_session_names.lock().unwrap();
+    forgotten_session_names.insert(session_name.to_owned());
+
+    if current_session_name.lock().unwrap().as_str() == session_name {
+        *current_session_name.lock().unwrap() = String::new();
+        *current_session_info.lock().unwrap() = SessionInfo::default();
+        *current_session_layout.lock().unwrap() = (String::new(), BTreeMap::new());
+        current_session_plugin_list.lock().unwrap().clear();
+    }
+
+    match std::fs::remove_dir_all(session_info_folder_for_session(session_name)) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => log::error!(
+            "Failed to delete resurrection state for session {:?}: {:?}",
+            session_name,
+            e
+        ),
     }
 }
 

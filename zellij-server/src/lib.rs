@@ -55,7 +55,7 @@ use crate::{
     screen::{screen_thread_main, ScreenInstruction},
     thread_bus::{Bus, ThreadSenders},
 };
-use route::{route_thread_main, NotificationEnd};
+use route::{route_thread_main, wait_for_action_completion, NotificationEnd};
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{
@@ -634,6 +634,40 @@ macro_rules! send_to_client {
     };
 }
 
+/// Saves one final resurrection snapshot before an explicit last-client quit exits the server.
+fn save_session_before_exit(
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+    client_id: ClientId,
+) {
+    let Some((senders, session_serialization)) = session_data.read().unwrap().as_ref().map(|s| {
+        let session_serialization = s
+            .session_configuration
+            .get_client_configuration(&client_id)
+            .options
+            .session_serialization
+            .unwrap_or(true);
+        (s.senders.clone(), session_serialization)
+    }) else {
+        return;
+    };
+    if !session_serialization {
+        return;
+    }
+
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    if let Err(e) = senders.send_to_screen(ScreenInstruction::SaveSession(
+        client_id,
+        Some(NotificationEnd::new(completion_tx)),
+    )) {
+        Err::<(), _>(e)
+            .context("failed to request final session save before exit")
+            .non_fatal();
+        return;
+    }
+
+    let _ = wait_for_action_completion(completion_rx, "save_session_before_exit", false);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SessionState {
     clients: HashMap<ClientId, Option<(Size, bool)>>, // bool -> is_web_client
@@ -744,15 +778,24 @@ impl SessionState {
         self.pipes.get(pipe_name).copied()
     }
     pub fn active_clients_are_connected(&self) -> bool {
+        self.active_client_count() > 0
+    }
+    pub fn active_client_count(&self) -> usize {
         let ids_of_pipe_clients: HashSet<ClientId> = self.pipes.values().copied().collect();
-        let mut active_clients_connected = false;
-        for client_id in self.clients.keys() {
-            if ids_of_pipe_clients.contains(client_id) {
-                continue;
-            }
-            active_clients_connected = true;
-        }
-        active_clients_connected
+        self.clients
+            .keys()
+            .filter(|client_id| !ids_of_pipe_clients.contains(client_id))
+            .count()
+    }
+    pub fn client_is_last_active_client(&self, client_id: ClientId) -> bool {
+        let ids_of_pipe_clients: HashSet<ClientId> = self.pipes.values().copied().collect();
+        self.clients.contains_key(&client_id)
+            && !ids_of_pipe_clients.contains(&client_id)
+            && self
+                .clients
+                .keys()
+                .filter(|client_id| !ids_of_pipe_clients.contains(client_id))
+                .all(|active_client_id| *active_client_id == client_id)
     }
     pub fn convert_client_to_watcher(&mut self, client_id: ClientId, is_web_client: bool) {
         self.clients.remove(&client_id);
@@ -1392,6 +1435,13 @@ pub fn start_server_impl(
 
                     os_input.remove_client(client_id).unwrap();
                 } else {
+                    let last_active_client = session_state
+                        .read()
+                        .unwrap()
+                        .client_is_last_active_client(client_id);
+                    if last_active_client {
+                        save_session_before_exit(&session_data, client_id);
+                    }
                     if let Some(session_data) = session_data.write().unwrap().as_mut() {
                         session_data.remove_key_passthrough_client(client_id);
                     }

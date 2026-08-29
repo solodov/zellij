@@ -2570,6 +2570,7 @@ impl Screen {
             .with_context(err_context)?;
         if self.tabs.is_empty() {
             self.active_tab_ids.clear();
+            self.forget_current_session_resurrection_state();
             self.bus
                 .senders
                 .send_to_server(ServerInstruction::Render(None))
@@ -6401,6 +6402,34 @@ impl Screen {
 
         Ok(())
     }
+
+    /// Forgets resurrection state when the user intentionally tears down every pane.
+    fn forget_current_session_resurrection_state(&mut self) {
+        self.resurrectable_sessions_cache.remove(&self.session_name);
+        if let Err(e) = self
+            .bus
+            .senders
+            .send_to_background_jobs(BackgroundJob::ForgetSessionState(self.session_name.clone()))
+        {
+            Err::<(), _>(e)
+                .context("failed to forget current session resurrection state")
+                .non_fatal();
+        }
+    }
+
+    fn session_has_selectable_panes(&self) -> bool {
+        self.tabs.values().any(|tab| tab.has_selectable_panes())
+    }
+
+    fn kill_session_if_no_selectable_panes(&mut self) -> bool {
+        if self.session_has_selectable_panes() {
+            return false;
+        }
+        self.forget_current_session_resurrection_state();
+        let _ = self.bus.senders.send_to_server(ServerInstruction::KillSession);
+        true
+    }
+
     pub fn update_session_infos(
         &mut self,
         new_session_infos: BTreeMap<String, SessionInfo>,
@@ -8067,12 +8096,8 @@ impl Screen {
                     }
                     if mouse_effect.kill_session_if_no_selectable_panes
                         && active_pane_id_before.is_some()
-                        && !self.tabs.values().any(|tab| tab.has_selectable_panes())
                     {
-                        let _ = self
-                            .bus
-                            .senders
-                            .send_to_server(ServerInstruction::KillSession);
+                        self.kill_session_if_no_selectable_panes();
                     }
                     let active_pane_id_after = self
                         .get_active_tab(client_id)
@@ -10290,8 +10315,10 @@ pub(crate) fn screen_thread_main(
                     screen.report_key_passthrough_state(client_id, old, new);
                 }
                 screen.sync_scroll_mode_on_focus(client_id)?;
-                screen.render(None)?;
-                screen.log_and_report_session_state()?;
+                if !screen.kill_session_if_no_selectable_panes() {
+                    screen.render(None)?;
+                    screen.log_and_report_session_state()?;
+                }
             },
             ScreenInstruction::SetSelectable(pid, selectable) => {
                 let all_tabs = screen.get_tabs_mut();
@@ -10400,6 +10427,7 @@ pub(crate) fn screen_thread_main(
                 }
                 screen.log_and_report_session_state().non_fatal();
                 screen.retain_only_existing_panes_in_pane_groups();
+                screen.kill_session_if_no_selectable_panes();
             },
             ScreenInstruction::HoldPane(id, exit_status, run_command) => {
                 let is_first_run = false;
@@ -13462,8 +13490,10 @@ pub(crate) fn screen_thread_main(
                 if !found {
                     log::error!("Pane with id {:?} not found", pane_id);
                 }
-                screen.render(None)?;
-                screen.log_and_report_session_state()?;
+                if !screen.kill_session_if_no_selectable_panes() {
+                    screen.render(None)?;
+                    screen.log_and_report_session_state()?;
+                }
             },
             ScreenInstruction::RenamePaneWithPaneId(pane_id, name, mut _completion_tx) => {
                 let all_tabs = screen.get_tabs_mut();
