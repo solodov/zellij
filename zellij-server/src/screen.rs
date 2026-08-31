@@ -9339,6 +9339,10 @@ pub(crate) fn screen_thread_main(
                 _completion_tx, // the action ends here, dropping this will release anything
                                 // waiting for it
             ) => {
+                let hover_help_cleared = screen
+                    .get_active_tab_mut(client_id)
+                    .map(|tab| tab.clear_hover_help_for_keyboard_input(client_id))
+                    .unwrap_or(false);
                 if let Some(plugin_id) = keybind_intercepts.get(&client_id) {
                     if let Some(key_with_modifier) = key_with_modifier {
                         let _ = screen
@@ -9349,6 +9353,9 @@ pub(crate) fn screen_thread_main(
                                 Some(client_id),
                                 Event::InterceptedKeyPress(key_with_modifier),
                             )]));
+                        if hover_help_cleared {
+                            screen.render(None)?;
+                        }
                         continue;
                     }
                 }

@@ -690,6 +690,26 @@ fn acme_hover_help_lines(target: AcmeHoverHelpTarget) -> Vec<&'static str> {
     }
 }
 
+impl AcmeHoverHelpState {
+    fn new(target: AcmeHoverHelpTarget, position: Position) -> Self {
+        AcmeHoverHelpState {
+            target,
+            position,
+            first_seen: Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn visible_for_tests(target: AcmeHoverHelpTarget, position: Position) -> Self {
+        AcmeHoverHelpState {
+            target,
+            position,
+            first_seen: Instant::now()
+                - std::time::Duration::from_millis((ACME_HOVER_HELP_DELAY_MS + 1) as u64),
+        }
+    }
+}
+
 fn schedule_acme_hover_help(
     tab: &mut Tab,
     target: AcmeHoverHelpTarget,
@@ -705,14 +725,8 @@ fn schedule_acme_hover_help(
     if was_visible {
         tab.set_force_render();
     }
-    tab.acme_hover_help.insert(
-        client_id,
-        AcmeHoverHelpState {
-            target,
-            position,
-            first_seen: Instant::now(),
-        },
-    );
+    tab.acme_hover_help
+        .insert(client_id, AcmeHoverHelpState::new(target, position));
     tab.senders
         .send_to_background_jobs(BackgroundJob::ShowAcmeHoverHelp { client_id })
         .context("failed to schedule Acme hover help")?;

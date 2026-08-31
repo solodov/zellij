@@ -1,4 +1,7 @@
-use super::{native_acme_viewport_for_display_area, Output, Tab};
+use super::{
+    mouse_handler::{AcmeHoverHelpState, AcmeHoverHelpTarget},
+    native_acme_viewport_for_display_area, Output, Tab,
+};
 use crate::panes::kitty_graphics::KittyImageStore;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::{CopyOptions, ScreenInstruction};
@@ -16299,6 +16302,85 @@ fn osc99_response_to_an_unidentified_notification_uses_the_protocol_default() {
         String::from_utf8_lossy(&response.bytes).contains("i=0"),
         "an app that sent no identifier is answered with i=0, got: {:?}",
         String::from_utf8_lossy(&response.bytes)
+    );
+}
+
+#[test]
+fn acme_hover_help_keeps_terminal_cursor_visible() {
+    let size = Size { cols: 80, rows: 24 };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    tab.handle_pty_bytes(1, Vec::from("prompt".as_bytes()))
+        .unwrap();
+    let expected_cursor_coordinates = tab
+        .get_active_terminal_cursor_position(client_id)
+        .and_then(|(x, y, is_visible)| is_visible.then_some((x, y)));
+    tab.acme_hover_help.insert(
+        client_id,
+        AcmeHoverHelpState::visible_for_tests(
+            AcmeHoverHelpTarget::AcmeTab,
+            Position::new(4, 20),
+        ),
+    );
+
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let serialized = output.serialize().unwrap();
+    let client_output = serialized.get(&client_id).unwrap();
+    let (_snapshot, cursor_coordinates) = take_snapshot_and_cursor_position(
+        client_output,
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+
+    assert!(
+        client_output.contains("left: switch"),
+        "hover help popup should be rendered"
+    );
+    assert_eq!(
+        cursor_coordinates, expected_cursor_coordinates,
+        "hover help popup should not hide or move the terminal cursor"
+    );
+}
+
+#[test]
+fn keyboard_input_clears_acme_hover_help_until_mouse_moves_again() {
+    let size = Size { cols: 80, rows: 24 };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    tab.acme_hover_help.insert(
+        client_id,
+        AcmeHoverHelpState::visible_for_tests(
+            AcmeHoverHelpTarget::AcmeTab,
+            Position::new(4, 20),
+        ),
+    );
+    tab.write_to_active_terminal(&None, Vec::from("a".as_bytes()), false, client_id)
+        .unwrap();
+
+    assert!(
+        !tab.acme_hover_help.contains_key(&client_id),
+        "typing should clear the existing hover help state"
+    );
+
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let serialized = output.serialize().unwrap();
+    let client_output = serialized.get(&client_id).unwrap();
+
+    assert!(
+        !client_output.contains("left: switch"),
+        "cleared hover help should not be redrawn without mouse motion"
+    );
+
+    tab.update_acme_tab_bar_hover_help(client_id, Position::new(4, 21), false)
+        .unwrap();
+    assert!(
+        tab.acme_hover_help.contains_key(&client_id),
+        "moving the mouse over a hover target should schedule help again"
     );
 }
 

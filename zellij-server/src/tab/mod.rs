@@ -4707,6 +4707,7 @@ impl Tab {
     ) -> Result<bool> {
         // returns true if a UI update should be triggered (eg. when closing a command pane with
         // ctrl-c)
+        self.clear_hover_help_for_keyboard_input(client_id);
         let mut should_trigger_ui_change = false;
         let mut pane_ids = self.get_static_and_floating_pane_ids();
         pane_ids.extend(
@@ -4749,7 +4750,7 @@ impl Tab {
         };
 
         self.clear_search(client_id);
-        self.mouse_help_text_visible.clear();
+        self.clear_hover_help_for_keyboard_input(client_id);
         let pane_id = if self.floating_panes.panes_are_visible() {
             self.floating_panes
                 .get_active_pane_id(client_id)
@@ -5613,9 +5614,7 @@ impl Tab {
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         for client_id in connected_clients {
-            if self.acme_context_menus.contains_key(&client_id)
-                || MouseHandler::acme_hover_help_visible_for_client(self, client_id)
-            {
+            if self.acme_context_menus.contains_key(&client_id) {
                 output.add_post_vte_instruction_to_client(client_id, "\u{1b}[?25l");
                 continue;
             }
@@ -7369,6 +7368,24 @@ impl Tab {
 
     pub fn clear_mouse_help_text(&mut self, client_id: ClientId) {
         self.mouse_help_text_visible.insert(client_id, false);
+    }
+
+    /// Clears hover-driven help when keyboard input resumes for the client.
+    pub fn clear_hover_help_for_keyboard_input(&mut self, client_id: ClientId) -> bool {
+        let mouse_help_was_visible = self
+            .mouse_help_text_visible
+            .remove(&client_id)
+            .unwrap_or(false);
+        let acme_hover_help_was_visible =
+            MouseHandler::acme_hover_help_visible_for_client(self, client_id);
+        self.acme_hover_help.remove(&client_id);
+
+        if mouse_help_was_visible || acme_hover_help_was_visible {
+            self.set_force_render();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn clear_acme_hover_help(&mut self, client_id: ClientId) -> bool {
