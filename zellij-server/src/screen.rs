@@ -143,6 +143,12 @@ enum AcmeTabBarHitTarget {
     Tab { tab_id: usize, position: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewTabPlacement {
+    Append,
+    AfterTabId(usize),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AcmeTabBarSegment {
     square_hit_start: usize,
@@ -698,6 +704,7 @@ pub enum ScreenInstruction {
         Option<Vec<CommandOrPlugin>>, // initial_panes
         bool,                         // block_on_first_terminal
         bool,                         // should_change_focus_to_new_tab
+        NewTabPlacement,              // placement
         (ClientId, bool),             // bool -> is_web_client
         Option<NotificationEnd>,      // completion signal
     ),
@@ -4710,9 +4717,9 @@ impl Screen {
         };
         match target {
             AcmeTabBarHitTarget::TabSquare { tab_id, position } => {
-                // Ctrl-right creates the next tab, matching rightward Acme column creation.
+                // Ctrl-right creates a tab immediately after the clicked tab.
                 if event.ctrl && event.right {
-                    self.request_new_acme_tab(client_id, event.position)?;
+                    self.request_new_acme_tab(client_id, event.position, tab_id)?;
                     return Ok(true);
                 }
                 if event.middle {
@@ -4808,7 +4815,12 @@ impl Screen {
         Ok(())
     }
 
-    fn request_new_acme_tab(&mut self, client_id: ClientId, mouse_origin: Position) -> Result<()> {
+    fn request_new_acme_tab(
+        &mut self,
+        client_id: ClientId,
+        mouse_origin: Position,
+        insert_after_tab_id: usize,
+    ) -> Result<()> {
         let is_web_client = self.client_is_web(client_id);
         self.bus.senders.send_to_screen(ScreenInstruction::NewTab(
             None,
@@ -4820,6 +4832,7 @@ impl Screen {
             None,
             false,
             true,
+            NewTabPlacement::AfterTabId(insert_after_tab_id),
             (client_id, is_web_client),
             None,
         ))?;
@@ -5468,13 +5481,31 @@ impl Screen {
         Ok(())
     }
 
-    /// Creates a new [`Tab`] in this [`Screen`]
+    /// Creates a new [`Tab`] in this [`Screen`].
     pub fn new_tab(
         &mut self,
         tab_id: usize,
         swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
         tab_name: Option<String>,
         client_id: Option<ClientId>,
+    ) -> Result<()> {
+        self.new_tab_at_placement(
+            tab_id,
+            swap_layouts,
+            tab_name,
+            client_id,
+            NewTabPlacement::Append,
+        )
+    }
+
+    /// Creates a new [`Tab`] at the requested position in this [`Screen`].
+    fn new_tab_at_placement(
+        &mut self,
+        tab_id: usize,
+        swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
+        tab_name: Option<String>,
+        client_id: Option<ClientId>,
+        placement: NewTabPlacement,
     ) -> Result<()> {
         let err_context = || format!("failed to create new tab for client {client_id:?}",);
 
@@ -5490,7 +5521,8 @@ impl Screen {
 
         let tab_name = tab_name.unwrap_or_else(|| String::new());
 
-        let position = self.tabs.len();
+        let position = self.new_tab_position(placement);
+        self.shift_tab_positions_at_or_after(position);
         let tab_size = self.size_for_client(client_id);
         let mut tab = Tab::new(
             tab_id,
@@ -5556,6 +5588,27 @@ impl Screen {
         self.tabs.insert(tab_id, tab);
         Ok(())
     }
+
+    fn new_tab_position(&self, placement: NewTabPlacement) -> usize {
+        match placement {
+            NewTabPlacement::Append => self.tabs.len(),
+            NewTabPlacement::AfterTabId(tab_id) => self
+                .tabs
+                .get(&tab_id)
+                .map(|tab| tab.position.saturating_add(1))
+                .unwrap_or_else(|| self.tabs.len())
+                .min(self.tabs.len()),
+        }
+    }
+
+    fn shift_tab_positions_at_or_after(&mut self, position: usize) {
+        for tab in self.tabs.values_mut() {
+            if tab.position >= position {
+                tab.position += 1;
+            }
+        }
+    }
+
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -10594,6 +10647,7 @@ pub(crate) fn screen_thread_main(
                 initial_panes,
                 block_on_first_terminal,
                 should_change_focus_to_new_tab,
+                placement,
                 (client_id, is_web_client),
                 completion_tx,
             ) => {
@@ -10614,11 +10668,12 @@ pub(crate) fn screen_thread_main(
                     swap_floating_layouts
                         .unwrap_or_else(|| screen.default_layout.swap_floating_layouts.clone()),
                 );
-                screen.new_tab(
+                screen.new_tab_at_placement(
                     tab_index,
                     resolved_swap_layouts,
                     tab_name.clone(),
                     client_id_for_new_tab,
+                    placement,
                 )?;
                 screen
                     .bus

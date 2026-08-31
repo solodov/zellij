@@ -9,7 +9,7 @@ use crate::{
     panes::PaneId,
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
-    screen::ScreenInstruction,
+    screen::{NewTabPlacement, ScreenInstruction},
     ServerInstruction, SessionMetaData, SessionState,
 };
 use std::thread;
@@ -1102,6 +1102,7 @@ pub(crate) fn route_action(
                     initial_panes,
                     block_on_first_terminal,
                     should_change_focus_to_new_tab,
+                    NewTabPlacement::Append,
                     (client_id, is_web_client),
                     Some(completion_tx),
                 ))

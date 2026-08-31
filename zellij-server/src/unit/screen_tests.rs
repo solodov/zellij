@@ -1,6 +1,6 @@
 use super::{
     acme_tab_bar_style, screen_thread_main, AcmeTabBarHitTarget, AcmeTabBarSegment, CopyOptions,
-    Screen, ScreenInstruction, ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND,
+    NewTabPlacement, Screen, ScreenInstruction, ACME_ACTIVE_MODE_TAB_BAR_FOREGROUND,
     ACME_ACTIVE_TAB_BAR_FOREGROUND, ACME_INACTIVE_MODE_TAB_BAR_FOREGROUND,
     ACME_INACTIVE_TAB_BAR_FOREGROUND, ACME_MODE_TAB_BAR_BACKGROUND, ACME_TAB_BAR_BACKGROUND,
 };
@@ -507,6 +507,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            NewTabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -600,6 +601,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            NewTabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -639,6 +641,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            NewTabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -687,6 +690,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            NewTabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -1144,7 +1148,37 @@ fn acme_tab_square_click_without_drag_still_switches_tabs() {
 }
 
 #[test]
-fn ctrl_right_click_acme_tab_square_requests_new_tab() {
+fn new_tab_after_tab_id_inserts_after_target() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B", "C"]);
+    let original_order = tab_ids_by_position(&screen);
+    let new_tab_id = screen.get_new_tab_id();
+
+    screen
+        .new_tab_at_placement(
+            new_tab_id,
+            (vec![], vec![]),
+            Some("new".to_owned()),
+            Some(client_id),
+            NewTabPlacement::AfterTabId(original_order[1]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        tab_ids_by_position(&screen),
+        vec![
+            original_order[0],
+            original_order[1],
+            new_tab_id,
+            original_order[2]
+        ]
+    );
+    assert_eq!(screen.tabs.get(&new_tab_id).unwrap().position, 2);
+}
+
+#[test]
+fn ctrl_right_click_acme_tab_square_requests_new_tab_after_clicked_tab() {
     let size = Size { cols: 80, rows: 20 };
     let client_id = 1;
     let mut screen = create_named_acme_tab_bar_screen(size, &["A", "B"]);
@@ -1152,6 +1186,7 @@ fn ctrl_right_click_acme_tab_square_requests_new_tab() {
         channels::unbounded();
     screen.bus.senders.to_screen = Some(SenderWithContext::new(to_screen));
     let segments = screen.acme_tab_bar_segments(size.cols, None);
+    let clicked_tab_id = segments[0].tab_id;
     let mut event =
         MouseEvent::new_right_press_event(position_on_tab_bar(segments[0].square_start));
     event.ctrl = true;
@@ -1159,10 +1194,12 @@ fn ctrl_right_click_acme_tab_square_requests_new_tab() {
     assert!(screen
         .handle_acme_tab_bar_mouse_event(&event, client_id)
         .unwrap());
-    assert!(matches!(
-        screen_receiver.try_recv().unwrap().0,
-        ScreenInstruction::NewTab(..)
-    ));
+    match screen_receiver.try_recv().unwrap().0 {
+        ScreenInstruction::NewTab(_, _, _, _, _, _, _, _, _, placement, _, _) => {
+            assert_eq!(placement, NewTabPlacement::AfterTabId(clicked_tab_id));
+        },
+        instruction => panic!("expected NewTab instruction, got {instruction:?}"),
+    }
 }
 
 #[test]
@@ -13277,6 +13314,7 @@ pub fn switching_tabs_syncs_scroll_mode() {
         None,
         false,
         true,
+        NewTabPlacement::Append,
         (client_id, false),
         None,
     ));

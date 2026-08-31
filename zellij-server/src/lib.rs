@@ -52,7 +52,7 @@ use crate::{
     panes::PaneId,
     plugins::{plugin_thread_main, PluginInstruction},
     pty::{get_default_shell, pty_thread_main, Pty, PtyInstruction},
-    screen::{screen_thread_main, ScreenInstruction},
+    screen::{screen_thread_main, NewTabPlacement, ScreenInstruction},
     thread_bus::{Bus, ThreadSenders},
 };
 use route::{route_thread_main, wait_for_action_completion, NotificationEnd};
@@ -1162,6 +1162,7 @@ pub fn start_server_impl(
                             initial_panes,
                             false, // block_on_first_terminal
                             should_focus_tab,
+                            NewTabPlacement::Append,
                             (client_id, is_web_client),
                             None,
                         ))
