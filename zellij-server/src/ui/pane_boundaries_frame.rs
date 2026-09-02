@@ -68,6 +68,8 @@ const ACTIVE_MODE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xaf, 0x62, 0x
 const INACTIVE_MODE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0xde, 0x97, 0x95));
 const ACME_ACTIVE_TITLE_BUTTON: char = '■';
 const ACME_INACTIVE_TITLE_BUTTON: char = '□';
+const ACME_WRAP_ENABLED_INDICATOR: char = '↩';
+const ACME_WRAP_DISABLED_INDICATOR: char = '→';
 
 pub(crate) fn render_acme_title_line_for_pane(
     title: &str,
@@ -81,9 +83,9 @@ pub(crate) fn render_acme_title_line_for_pane(
     let title_style = acme_title_style(is_main_client, highlight_title_for_mode);
     let button_style = acme_title_button_style(is_main_client, highlight_title_for_mode);
     let status_style = acme_title_status_style(is_main_client, highlight_title_for_mode);
-    let wrap_style = title_status.display_wrap_enabled.map(|enabled| {
-        acme_title_wrap_indicator_style(enabled, is_main_client, highlight_title_for_mode)
-    });
+    let wrap_style = title_status
+        .display_wrap_enabled
+        .map(|_| acme_title_wrap_indicator_style(is_main_client, highlight_title_for_mode));
     let status_width = if title_status.display_wrap_enabled.is_some() {
         pane_title_wrap_indicator_column(width, status_trailing_spaces)
             .map(|column| width - column)
@@ -146,9 +148,9 @@ pub(crate) fn render_acme_title_line_for_pane(
     if status_width > 0 {
         if let Some(wrap_style) = wrap_style {
             let indicator = if title_status.display_wrap_enabled == Some(true) {
-                'W'
+                ACME_WRAP_ENABLED_INDICATOR
             } else {
-                'w'
+                ACME_WRAP_DISABLED_INDICATOR
             };
             line.push(TerminalCharacter::new_styled(indicator, wrap_style));
             line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
@@ -218,7 +220,6 @@ fn acme_title_status_style(
 }
 
 fn acme_title_wrap_indicator_style(
-    enabled: bool,
     is_main_client: bool,
     highlight_title_for_mode: bool,
 ) -> RcCharacterStyles {
@@ -243,11 +244,7 @@ fn acme_title_wrap_indicator_style(
         } else {
             inactive_foreground
         });
-        styles.bold = Some(if enabled {
-            AnsiCode::On
-        } else {
-            AnsiCode::Reset
-        });
+        styles.bold = Some(AnsiCode::On);
         styles.dim = Some(AnsiCode::Reset);
         styles.underline = Some(AnsiCode::Underline(None));
     });
@@ -1978,7 +1975,7 @@ mod tests {
     }
 
     #[test]
-    fn acme_title_wrap_indicator_uses_state_weight_and_color() {
+    fn acme_title_wrap_indicator_uses_state_symbol_and_color() {
         let mut frame = pane_frame_with(false, false, 16);
         frame.title = "termflow".to_owned();
         frame.should_draw_pane_frames = false;
@@ -1989,8 +1986,8 @@ mod tests {
         };
 
         let title_line = frame.render_one_line_title().unwrap();
-        assert_eq!(characters_to_string(&title_line), " ■ termflow W ⠋ ");
-        assert_eq!(title_line[12].character, 'W');
+        assert_eq!(characters_to_string(&title_line), " ■ termflow ↩ ⠋ ");
+        assert_eq!(title_line[12].character, ACME_WRAP_ENABLED_INDICATOR);
         assert_eq!(title_line[12].styles.bold, Some(AnsiCode::On));
         assert_eq!(title_line[12].styles.dim, Some(AnsiCode::Reset));
         assert_eq!(
@@ -2004,8 +2001,8 @@ mod tests {
 
         frame.title_status.display_wrap_enabled = Some(false);
         let title_line = frame.render_one_line_title().unwrap();
-        assert_eq!(title_line[12].character, 'w');
-        assert_eq!(title_line[12].styles.bold, Some(AnsiCode::Reset));
+        assert_eq!(title_line[12].character, ACME_WRAP_DISABLED_INDICATOR);
+        assert_eq!(title_line[12].styles.bold, Some(AnsiCode::On));
         assert_eq!(title_line[12].styles.dim, Some(AnsiCode::Reset));
         assert_eq!(
             title_line[12].styles.underline,
@@ -2025,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn acme_title_wrap_indicator_click_target_is_the_w_cell() {
+    fn acme_title_wrap_indicator_click_target_is_the_indicator_cell() {
         assert_eq!(pane_title_wrap_indicator_column(16, 1), Some(12));
         assert_eq!(pane_title_wrap_indicator_column(4, 1), Some(0));
         assert_eq!(pane_title_wrap_indicator_column(3, 1), None);
