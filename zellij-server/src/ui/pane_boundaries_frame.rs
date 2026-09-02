@@ -75,16 +75,26 @@ pub(crate) fn render_acme_title_line_for_pane(
     is_main_client: bool,
     highlight_title_for_mode: bool,
     _mouse_is_hovering_over_pane: bool,
-    acme_title_status: Option<char>,
+    title_status: PaneTitleStatus,
     status_trailing_spaces: usize,
 ) -> Vec<TerminalCharacter> {
     let title_style = acme_title_style(is_main_client, highlight_title_for_mode);
     let button_style = acme_title_button_style(is_main_client, highlight_title_for_mode);
     let status_style = acme_title_status_style(is_main_client, highlight_title_for_mode);
-    let status_width = acme_title_status
-        .map(|status| 1 + status.width().unwrap_or(0) + status_trailing_spaces)
-        .filter(|status_width| *status_width <= width)
-        .unwrap_or(0);
+    let wrap_style = title_status.display_wrap_enabled.map(|enabled| {
+        acme_title_wrap_indicator_style(enabled, is_main_client, highlight_title_for_mode)
+    });
+    let status_width = if title_status.display_wrap_enabled.is_some() {
+        pane_title_wrap_indicator_column(width, status_trailing_spaces)
+            .map(|column| width - column)
+            .unwrap_or(0)
+    } else {
+        title_status
+            .spinner
+            .map(|status| 1 + status.width().unwrap_or(0) + status_trailing_spaces)
+            .filter(|status_width| *status_width <= width)
+            .unwrap_or(0)
+    };
     let title_width = width.saturating_sub(status_width);
     let mut line = vec![];
     let mut used_width = 0;
@@ -133,9 +143,23 @@ pub(crate) fn render_acme_title_line_for_pane(
         line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
         used_width += 1;
     }
-    if let Some(status) = acme_title_status.filter(|_| status_width > 0) {
-        line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
-        line.push(TerminalCharacter::new_styled(status, status_style));
+    if status_width > 0 {
+        if let Some(wrap_style) = wrap_style {
+            let indicator = if title_status.display_wrap_enabled == Some(true) {
+                'W'
+            } else {
+                'w'
+            };
+            line.push(TerminalCharacter::new_styled(indicator, wrap_style));
+            line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
+            line.push(TerminalCharacter::new_styled(
+                title_status.spinner.unwrap_or(' '),
+                status_style,
+            ));
+        } else if let Some(status) = title_status.spinner {
+            line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
+            line.push(TerminalCharacter::new_styled(status, status_style));
+        }
         for _ in 0..status_trailing_spaces {
             line.push(TerminalCharacter::new_styled(' ', title_style.clone()));
         }
@@ -193,6 +217,43 @@ fn acme_title_status_style(
     acme_title_button_style(is_main_client, highlight_title_for_mode)
 }
 
+fn acme_title_wrap_indicator_style(
+    enabled: bool,
+    is_main_client: bool,
+    highlight_title_for_mode: bool,
+) -> RcCharacterStyles {
+    let mut styles = RcCharacterStyles::reset();
+    let (background, active_foreground, inactive_foreground) = if highlight_title_for_mode {
+        (
+            MODE_TITLE_BACKGROUND,
+            ACTIVE_MODE_TITLE_FOREGROUND,
+            INACTIVE_MODE_TITLE_FOREGROUND,
+        )
+    } else {
+        (
+            ACME_TITLE_BACKGROUND,
+            ACME_ACTIVE_TITLE_FOREGROUND,
+            ACME_INACTIVE_TITLE_FOREGROUND,
+        )
+    };
+    styles.update(|styles| {
+        styles.background = Some(background);
+        styles.foreground = Some(if is_main_client {
+            active_foreground
+        } else {
+            inactive_foreground
+        });
+        styles.bold = Some(if enabled {
+            AnsiCode::On
+        } else {
+            AnsiCode::Reset
+        });
+        styles.dim = Some(AnsiCode::Reset);
+        styles.underline = Some(AnsiCode::Underline(None));
+    });
+    styles
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ExitStatus {
     Code(i32),
@@ -206,6 +267,20 @@ pub struct StackListEntry {
     pub is_selected: bool,
     pub is_emphasized: bool,
     pub stack_is_focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneTitleStatus {
+    pub display_wrap_enabled: Option<bool>,
+    pub spinner: Option<char>,
+}
+
+pub(crate) fn pane_title_wrap_indicator_column(
+    title_width: usize,
+    status_trailing_spaces: usize,
+) -> Option<usize> {
+    let status_width = 3 + status_trailing_spaces; // w, spacer, spinner slot
+    title_width.checked_sub(status_width)
 }
 
 pub struct FrameParams {
@@ -223,7 +298,7 @@ pub struct FrameParams {
     pub frameless_title_on_previous_line: bool,
     pub acme_title: bool,
     pub title_mode_highlight: bool,
-    pub acme_title_status: Option<char>,
+    pub title_status: PaneTitleStatus,
     pub force_render: bool,
     pub pane_is_floating: bool,
     pub content_offset: Offset,
@@ -262,7 +337,7 @@ pub struct PaneFrame {
     frameless_title_on_previous_line: bool,
     acme_title: bool,
     title_mode_highlight: bool,
-    acme_title_status: Option<char>,
+    title_status: PaneTitleStatus,
     is_pinned: bool,
     is_floating: bool,
     content_offset: Offset,
@@ -306,7 +381,7 @@ impl PaneFrame {
             frameless_title_on_previous_line: frame_params.frameless_title_on_previous_line,
             acme_title: frame_params.acme_title,
             title_mode_highlight: frame_params.title_mode_highlight,
-            acme_title_status: frame_params.acme_title_status,
+            title_status: frame_params.title_status,
             is_pinned: false,
             is_floating: frame_params.pane_is_floating,
             content_offset: frame_params.content_offset,
@@ -464,7 +539,10 @@ impl PaneFrame {
                 prefix_len + full_indication_len,
             ))
         } else if full_indication_len <= max_length {
-            Some((self.title_line_characters(&full_indication), full_indication_len))
+            Some((
+                self.title_line_characters(&full_indication),
+                full_indication_len,
+            ))
         } else if short_indication_len <= max_length {
             Some((
                 self.title_line_characters(&short_indication),
@@ -482,7 +560,10 @@ impl PaneFrame {
         let full_indication = format!(" PIN [{}] ", is_checked);
         let full_indication_len = full_indication.chars().count();
         if full_indication_len <= max_length {
-            Some((self.title_line_characters(&full_indication), full_indication_len))
+            Some((
+                self.title_line_characters(&full_indication),
+                full_indication_len,
+            ))
         } else {
             None
         }
@@ -1040,9 +1121,7 @@ impl PaneFrame {
         }
 
         if self.frameless_title_fills_width {
-            return Ok(self.highlight_title_line_for_mode(
-                self.title_line_without_middle(),
-            ));
+            return Ok(self.highlight_title_line_for_mode(self.title_line_without_middle()));
         }
 
         let width = self.geom.cols;
@@ -1053,24 +1132,23 @@ impl PaneFrame {
         let focus_length = focus.as_ref().map(|(_, length)| *length).unwrap_or(0);
         let right_budget = width.saturating_sub(focus_length + title_length);
         let right = self.bracketed_scroll_indicator(right_budget);
-        Ok(self.highlight_title_line_for_mode(
-            self.compose_bracketed_title(focus, title, right),
-        ))
+        Ok(self.highlight_title_line_for_mode(self.compose_bracketed_title(focus, title, right)))
     }
     fn render_acme_title_line(&self) -> Vec<TerminalCharacter> {
-        // Frameless titles with a right content offset lose their last cell to
-        // the vertical boundary renderer, so reserve one extra status pad cell.
-        let status_trailing_spaces =
-            1 + usize::from(self.content_offset.right != 0 && !self.should_draw_pane_frames);
         render_acme_title_line_for_pane(
             &self.title,
             self.geom.cols,
             self.is_main_client,
             self.title_is_highlighted_for_scroll(),
             self.mouse_is_hovering_over_pane,
-            self.acme_title_status,
-            status_trailing_spaces,
+            self.title_status,
+            self.title_status_trailing_spaces(),
         )
+    }
+    fn title_status_trailing_spaces(&self) -> usize {
+        // Frameless titles with a right content offset lose their last cell to
+        // the vertical boundary renderer, so reserve one extra status pad cell.
+        1 + usize::from(self.content_offset.right != 0 && !self.should_draw_pane_frames)
     }
     fn bracketed_title_part(&self, content: &str) -> (Vec<TerminalCharacter>, usize) {
         let text = format!(" [ {} ] ", content);
@@ -1689,7 +1767,7 @@ mod tests {
                 frameless_title_on_previous_line: false,
                 acme_title: false,
                 title_mode_highlight: false,
-                acme_title_status: None,
+                title_status: PaneTitleStatus::default(),
                 force_render: false,
                 pane_is_floating: is_floating,
                 content_offset: Offset::default(),
@@ -1805,19 +1883,13 @@ mod tests {
         frame.title_mode_highlight = true;
 
         let title_line = frame.render_one_line_title().unwrap();
-        assert_eq!(
-            title_line[1].styles.background,
-            Some(MODE_TITLE_BACKGROUND)
-        );
+        assert_eq!(title_line[1].styles.background, Some(MODE_TITLE_BACKGROUND));
         assert_eq!(
             title_line[3].styles.foreground,
             Some(ACTIVE_MODE_TITLE_FOREGROUND)
         );
         assert_eq!(title_line[3].styles.bold, Some(AnsiCode::On));
-        assert_eq!(
-            title_line[0].styles.background,
-            Some(MODE_TITLE_BACKGROUND)
-        );
+        assert_eq!(title_line[0].styles.background, Some(MODE_TITLE_BACKGROUND));
     }
 
     #[test]
@@ -1827,10 +1899,7 @@ mod tests {
         frame.scroll_position = (3, 12);
 
         let title_line = frame.render_one_line_title().unwrap();
-        assert_eq!(
-            title_line[0].styles.background,
-            Some(MODE_TITLE_BACKGROUND)
-        );
+        assert_eq!(title_line[0].styles.background, Some(MODE_TITLE_BACKGROUND));
         assert_eq!(
             title_line[3].styles.foreground,
             Some(ACTIVE_MODE_TITLE_FOREGROUND)
@@ -1876,7 +1945,7 @@ mod tests {
         frame.is_main_client = false;
         frame.should_draw_pane_frames = false;
         frame.acme_title = true;
-        frame.acme_title_status = Some('⠋');
+        frame.title_status.spinner = Some('⠋');
 
         let title_line = frame.render_one_line_title().unwrap();
         assert_eq!(characters_to_string(&title_line), " □ termflow   ⠋ ");
@@ -1906,6 +1975,60 @@ mod tests {
             active_title_line[14].styles.foreground,
             Some(ACME_ACTIVE_TITLE_FOREGROUND)
         );
+    }
+
+    #[test]
+    fn acme_title_wrap_indicator_uses_state_weight_and_color() {
+        let mut frame = pane_frame_with(false, false, 16);
+        frame.title = "termflow".to_owned();
+        frame.should_draw_pane_frames = false;
+        frame.acme_title = true;
+        frame.title_status = PaneTitleStatus {
+            display_wrap_enabled: Some(true),
+            spinner: Some('⠋'),
+        };
+
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(characters_to_string(&title_line), " ■ termflow W ⠋ ");
+        assert_eq!(title_line[12].character, 'W');
+        assert_eq!(title_line[12].styles.bold, Some(AnsiCode::On));
+        assert_eq!(title_line[12].styles.dim, Some(AnsiCode::Reset));
+        assert_eq!(
+            title_line[12].styles.underline,
+            Some(AnsiCode::Underline(None))
+        );
+        assert_eq!(
+            title_line[12].styles.foreground,
+            Some(ACME_ACTIVE_TITLE_FOREGROUND)
+        );
+
+        frame.title_status.display_wrap_enabled = Some(false);
+        let title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(title_line[12].character, 'w');
+        assert_eq!(title_line[12].styles.bold, Some(AnsiCode::Reset));
+        assert_eq!(title_line[12].styles.dim, Some(AnsiCode::Reset));
+        assert_eq!(
+            title_line[12].styles.underline,
+            Some(AnsiCode::Underline(None))
+        );
+        assert_eq!(
+            title_line[12].styles.foreground,
+            Some(ACME_ACTIVE_TITLE_FOREGROUND)
+        );
+
+        frame.is_main_client = false;
+        let inactive_title_line = frame.render_one_line_title().unwrap();
+        assert_eq!(
+            inactive_title_line[12].styles.foreground,
+            Some(ACME_INACTIVE_TITLE_FOREGROUND)
+        );
+    }
+
+    #[test]
+    fn acme_title_wrap_indicator_click_target_is_the_w_cell() {
+        assert_eq!(pane_title_wrap_indicator_column(16, 1), Some(12));
+        assert_eq!(pane_title_wrap_indicator_column(4, 1), Some(0));
+        assert_eq!(pane_title_wrap_indicator_column(3, 1), None);
     }
 
     #[test]

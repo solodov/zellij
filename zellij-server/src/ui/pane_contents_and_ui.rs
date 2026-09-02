@@ -3,7 +3,7 @@ use crate::panes::terminal_character::AnsiCode;
 use crate::panes::PaneId;
 use crate::tab::Pane;
 use crate::ui::boundaries::Boundaries;
-use crate::ui::pane_boundaries_frame::{FrameParams, StackListEntry};
+use crate::ui::pane_boundaries_frame::{FrameParams, PaneTitleStatus, StackListEntry};
 use crate::ClientId;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -395,10 +395,13 @@ impl<'a> PaneContentsAndUi<'a> {
         });
         let frame_is_dimmed = self.frame_is_dimmed_for_client(client_id);
         let guest_choice_indicator = self.pane.guest_choice_indicator(client_id);
-        let acme_title_status = if self.acme_title {
-            acme_long_running_command_spinner(self.pane.command_running_since())
-        } else {
-            None
+        let title_status = PaneTitleStatus {
+            display_wrap_enabled: self.pane.display_wrap_enabled(),
+            spinner: if self.acme_title {
+                acme_long_running_command_spinner(self.pane.command_running_since())
+            } else {
+                None
+            },
         };
         let title_mode_highlight = matches!(
             client_mode,
@@ -420,7 +423,7 @@ impl<'a> PaneContentsAndUi<'a> {
                 frameless_title_on_previous_line: self.frameless_title_on_previous_line,
                 acme_title: self.acme_title,
                 title_mode_highlight,
-                acme_title_status,
+                title_status,
                 force_render: self.force_render_frame,
                 pane_is_floating,
                 content_offset: self.pane.get_content_offset(),
@@ -455,7 +458,7 @@ impl<'a> PaneContentsAndUi<'a> {
                 frameless_title_on_previous_line: self.frameless_title_on_previous_line,
                 acme_title: self.acme_title,
                 title_mode_highlight,
-                acme_title_status,
+                title_status,
                 force_render: self.force_render_frame,
                 pane_is_floating,
                 content_offset: self.pane.get_content_offset(),

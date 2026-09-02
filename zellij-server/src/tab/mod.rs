@@ -469,6 +469,10 @@ pub trait Pane {
     fn get_pane_default_colors(&self) -> (Option<String>, Option<String>) {
         (None, None)
     }
+    fn display_wrap_enabled(&self) -> Option<bool> {
+        None
+    }
+    fn toggle_display_wrap(&mut self) {}
 
     fn right_boundary_x_coords(&self) -> usize {
         self.x() + self.cols()
@@ -2539,8 +2543,7 @@ impl Tab {
             && matches!(
                 &new_pane_placement,
                 NewPanePlacement::AcmeColumn | NewPanePlacement::AcmePane
-            )
-        {
+            ) {
             client_id.and_then(|client_id| {
                 self.pending_acme_pane_control_square_mouse_origins
                     .remove(&client_id)
@@ -2714,16 +2717,8 @@ impl Tab {
         );
     }
 
-    fn move_mouse_from_position_to_pane_title(
-        &mut self,
-        pane_id: PaneId,
-        origin: Position,
-    ) {
-        self.move_mouse_to_pane_from_position(
-            pane_id,
-            origin,
-            AcmeMouseMoveTarget::PaneTitle,
-        );
+    fn move_mouse_from_position_to_pane_title(&mut self, pane_id: PaneId, origin: Position) {
+        self.move_mouse_to_pane_from_position(pane_id, origin, AcmeMouseMoveTarget::PaneTitle);
     }
 
     fn move_mouse_from_position_to_pane_vertical_border(
@@ -2769,8 +2764,7 @@ impl Tab {
             return;
         };
 
-        let dx =
-            (target.column() as isize - origin.column() as isize) * cell_size.width as isize;
+        let dx = (target.column() as isize - origin.column() as isize) * cell_size.width as isize;
         let dy = (target.line() - origin.line()) * cell_size.height as isize;
 
         crate::mouse_positioner::move_mouse_by(dx, dy);
@@ -2822,7 +2816,9 @@ impl Tab {
                 (pane.x(), pane.get_content_x())
             },
             PaneEdge::Right | PaneEdge::TopRight | PaneEdge::BottomRight => {
-                let left = pane.get_content_x().checked_add(pane.get_content_columns())?;
+                let left = pane
+                    .get_content_x()
+                    .checked_add(pane.get_content_columns())?;
                 let right_exclusive = pane.x().checked_add(pane.cols())?;
                 (left, right_exclusive)
             },

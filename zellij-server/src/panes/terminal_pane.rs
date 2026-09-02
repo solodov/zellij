@@ -490,6 +490,14 @@ impl Pane for TerminalPane {
     fn get_pane_default_colors(&self) -> (Option<String>, Option<String>) {
         self.grid.get_pane_default_color_strings()
     }
+    fn display_wrap_enabled(&self) -> Option<bool> {
+        Some(self.grid.display_wrap_enabled())
+    }
+    fn toggle_display_wrap(&mut self) {
+        self.grid.toggle_display_wrap();
+        self.render_full_viewport();
+        self.set_should_render(true);
+    }
     fn render(
         &mut self,
         _client_id: Option<ClientId>,

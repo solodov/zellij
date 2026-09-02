@@ -20,12 +20,11 @@ use acme::{
     acme_geometries_after_moving_pane_to_position, acme_geometries_after_removing_pane,
     acme_geometries_after_reordering_pane, acme_geometries_after_restoring_pane_rows,
     acme_geometries_after_swapping_column, acme_own_line_title_boundary_segments,
-    acme_own_line_title_pane_ids,
-    acme_pane_is_maximized, acme_panes_before_own_line_title, acme_previous_line_title_pane_ids,
-    acme_rows_dimension, acme_title_pane_ids, equalized_acme_row_heights, equalized_lengths,
-    percent_dimension, resize_acme_column_pane, AcmeColumn, AcmePaneGeometry,
-    AcmePaneRowsSnapshot, ACME_BOUNDARY_COLOR, ACME_COLLAPSED_PANE_ROWS,
-    ACME_TITLE_BUTTON_COLUMN_OFFSET,
+    acme_own_line_title_pane_ids, acme_pane_is_maximized, acme_panes_before_own_line_title,
+    acme_previous_line_title_pane_ids, acme_rows_dimension, acme_title_pane_ids,
+    equalized_acme_row_heights, equalized_lengths, percent_dimension, resize_acme_column_pane,
+    AcmeColumn, AcmePaneGeometry, AcmePaneRowsSnapshot, ACME_BOUNDARY_COLOR,
+    ACME_COLLAPSED_PANE_ROWS, ACME_TITLE_BUTTON_COLUMN_OFFSET,
 };
 use tiled_pane_grid::{split, TiledPaneGrid, RESIZE_PERCENT};
 
@@ -42,6 +41,7 @@ use crate::{
     },
     thread_bus::ThreadSenders,
     ui::boundaries::Boundaries,
+    ui::pane_boundaries_frame::pane_title_wrap_indicator_column,
     ui::pane_contents_and_ui::{PaneContentsAndUi, PaneFrameRenderOptions},
     ClientId,
 };
@@ -657,9 +657,7 @@ impl TiledPanes {
         {
             return false;
         }
-        if self.acme_columns().is_ok()
-            && !self.native_acme_pane_extents_miss_viewport(true)
-        {
+        if self.acme_columns().is_ok() && !self.native_acme_pane_extents_miss_viewport(true) {
             return false;
         }
         self.native_acme_pane_extents_miss_viewport(false)
@@ -2602,7 +2600,9 @@ impl TiledPanes {
         let err_context = || format!("failed to resize pand with id: {:?}", pane_id);
         let change_by = resize_percent.unwrap_or((RESIZE_PERCENT, RESIZE_PERCENT));
 
-        if let Some(changed) = self.resize_acme_pane_with_strategies(pane_id, &[strategy], change_by)? {
+        if let Some(changed) =
+            self.resize_acme_pane_with_strategies(pane_id, &[strategy], change_by)?
+        {
             return Ok(changed);
         }
 
@@ -2615,11 +2615,7 @@ impl TiledPanes {
 
         let mut pane_size_changed = false;
         match pane_grid
-            .change_pane_size(
-                &pane_id,
-                &strategy,
-                change_by,
-            )
+            .change_pane_size(&pane_id, &strategy, change_by)
             .with_context(err_context)
         {
             Ok(changed) => {
@@ -4094,6 +4090,19 @@ impl TiledPanes {
         } else {
             None
         }
+    }
+
+    /// Return the pane whose Acme title wrap indicator owns this screen position.
+    pub fn acme_wrap_indicator_pane_id_at_position(&self, position: &Position) -> Option<PaneId> {
+        let (pane_id, _, geom) = self.acme_title_hit_at_position(position)?;
+        let pane = self.panes.get(&pane_id)?;
+        pane.display_wrap_enabled()?;
+        let status_trailing_spaces = 1 + usize::from(
+            pane.get_content_offset().right != 0 && !self.pane_frame_style.draws_full_frames(),
+        );
+        let wrap_indicator_column =
+            pane_title_wrap_indicator_column(geom.cols.as_usize(), status_trailing_spaces)?;
+        (position.column() == geom.x + wrap_indicator_column).then_some(pane_id)
     }
 
     /// Return the screen-cell position of an Acme pane's title button.

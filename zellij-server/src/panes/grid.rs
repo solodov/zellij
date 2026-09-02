@@ -818,6 +818,11 @@ enum RegionRowsScrolled {
     Nothing,
 }
 
+struct DisplayWrapProjection {
+    rows: Vec<Row>,
+    cursor_coordinates: Option<(usize, usize)>,
+}
+
 #[derive(Clone, Copy)]
 struct KittyRowSnapshot {
     lines_above_len: usize,
@@ -860,6 +865,7 @@ pub struct Grid {
     pub sixel_scrolling: bool,      // DECSDM
     pub insert_mode: bool,
     pub disable_linewrap: bool,
+    display_wrap_enabled: bool,
     pub new_line_mode: bool, // Automatic newline LNM
     pub clear_viewport_before_rendering: bool,
     pub width: usize,
@@ -1241,6 +1247,7 @@ impl Grid {
             sixel_scrolling: false,
             insert_mode: false,
             disable_linewrap: false,
+            display_wrap_enabled: true,
             new_line_mode: false,
             alternate_screen_state: None,
             clear_viewport_before_rendering: false,
@@ -1304,6 +1311,14 @@ impl Grid {
         if self.word_separators != word_separators {
             self.word_separators = word_separators.to_owned();
         }
+    }
+    pub fn display_wrap_enabled(&self) -> bool {
+        self.display_wrap_enabled
+    }
+    pub fn toggle_display_wrap(&mut self) {
+        self.display_wrap_enabled = !self.display_wrap_enabled;
+        self.reset_viewport();
+        self.output_buffer.update_all_lines();
     }
     /// Return when the current OSC 133 command-output phase began, if any.
     pub fn osc133_command_running_since(&self) -> Option<Instant> {
@@ -1547,6 +1562,44 @@ impl Grid {
         let rows_below_the_viewport = self.kitty_rows_below_the_viewport();
         self.kitty_grid
             .settle_placements_below_the_viewport(rows_below_the_viewport)
+    }
+    fn display_wrap_projection(&self) -> DisplayWrapProjection {
+        let mut rows: Vec<Row> = self.lines_above.iter().cloned().collect();
+        let mut cursor_logical_position = None;
+        let mut current_logical_row = rows.len().checked_sub(1);
+
+        for (viewport_row_index, row) in self.viewport.iter().enumerate() {
+            let starts_logical_row = row.is_canonical || current_logical_row.is_none();
+            if starts_logical_row {
+                let mut projected_row = row.clone();
+                projected_row.is_canonical = true;
+                rows.push(projected_row);
+                let logical_row_index = rows.len().saturating_sub(1);
+                current_logical_row = Some(logical_row_index);
+                if viewport_row_index == self.cursor.y {
+                    cursor_logical_position = Some((logical_row_index, self.cursor.x));
+                }
+            } else if let Some(logical_row_index) = current_logical_row {
+                let row_start_column = rows[logical_row_index].width();
+                if viewport_row_index == self.cursor.y {
+                    cursor_logical_position =
+                        Some((logical_row_index, row_start_column + self.cursor.x));
+                }
+                let mut row_to_append = row.clone();
+                rows[logical_row_index].append(&mut row_to_append);
+            }
+        }
+
+        let first_visible_row = rows.len().saturating_sub(self.height);
+        let cursor_coordinates = cursor_logical_position.and_then(|(row_index, column)| {
+            (row_index >= first_visible_row && row_index < first_visible_row + self.height)
+                .then_some((column, row_index - first_visible_row))
+        });
+        let rows = rows.into_iter().skip(first_visible_row).collect();
+        DisplayWrapProjection {
+            rows,
+            cursor_coordinates,
+        }
     }
     fn kitty_reanchor_all_from_pixels(&mut self) {
         self.kitty_settle_placements_below_the_viewport();
@@ -1972,13 +2025,25 @@ impl Grid {
         Vec<SixelImageChunk>,
         Vec<KittyImageChunk>,
     ) {
-        let changed_character_chunks = self.output_buffer.changed_chunks_in_viewport(
-            self.viewport.make_contiguous(),
-            self.width,
-            self.height,
-            x_offset,
-            y_offset,
-        );
+        let changed_character_chunks =
+            if self.display_wrap_enabled || self.alternate_screen_state.is_some() {
+                self.output_buffer.changed_chunks_in_viewport(
+                    self.viewport.make_contiguous(),
+                    self.width,
+                    self.height,
+                    x_offset,
+                    y_offset,
+                )
+            } else {
+                let projection = self.display_wrap_projection();
+                self.output_buffer.changed_chunks_in_viewport(
+                    &projection.rows,
+                    self.width,
+                    self.height,
+                    x_offset,
+                    y_offset,
+                )
+            };
         let changed_rects = self
             .output_buffer
             .changed_rects_in_viewport(self.viewport.len());
@@ -2057,6 +2122,9 @@ impl Grid {
         }
         let raw_vte_output = String::new();
 
+        if !self.display_wrap_enabled && self.alternate_screen_state.is_none() {
+            self.output_buffer.update_all_lines();
+        }
         let (mut character_chunks, sixel_image_chunks, kitty_image_chunks) =
             self.read_changes(content_x, content_y);
 
@@ -2161,7 +2229,14 @@ impl Grid {
     /// bounds) so that the host terminal can position the cursor for IME even
     /// when the app has hidden it. The bool is true when the cursor is visible.
     pub fn cursor_coordinates(&self) -> Option<(usize, usize, bool)> {
-        if self.cursor.x >= self.width || self.cursor.y >= self.height {
+        if !self.display_wrap_enabled && self.alternate_screen_state.is_none() {
+            let (x, y) = self.display_wrap_projection().cursor_coordinates?;
+            if x >= self.width || y >= self.height {
+                None
+            } else {
+                Some((x, y, !self.cursor_is_hidden))
+            }
+        } else if self.cursor.x >= self.width || self.cursor.y >= self.height {
             None
         } else {
             Some((self.cursor.x, self.cursor.y, !self.cursor_is_hidden))

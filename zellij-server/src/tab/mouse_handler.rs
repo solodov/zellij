@@ -162,6 +162,9 @@ enum MouseAction {
     AcmeClosePane {
         pane_id: PaneId,
     },
+    TogglePaneWrap {
+        pane_id: PaneId,
+    },
     PasteFromHostClipboard {
         pane_id: PaneId,
     },
@@ -760,6 +763,7 @@ struct MouseEventContext {
     acme_vertical_border_hit: bool,
     acme_title_pane_id: Option<PaneId>,
     acme_title_button_pane_id: Option<PaneId>,
+    acme_wrap_indicator_pane_id: Option<PaneId>,
     pinned_selectable: Option<PaneId>,
     pinned_unselectable: Option<PaneId>,
     focus_follows_mouse: bool,
@@ -1124,16 +1128,19 @@ impl MouseHandler {
                         .unwrap_or(false)
             })
             .unwrap_or(false);
-        let (acme_title_pane_id, acme_title_button_pane_id) = if floating_visible {
-            (None, None)
-        } else {
-            (
-                tab.tiled_panes
-                    .acme_title_pane_id_at_position(&event.position),
-                tab.tiled_panes
-                    .acme_title_button_pane_id_at_position(&event.position),
-            )
-        };
+        let (acme_title_pane_id, acme_title_button_pane_id, acme_wrap_indicator_pane_id) =
+            if floating_visible {
+                (None, None, None)
+            } else {
+                (
+                    tab.tiled_panes
+                        .acme_title_pane_id_at_position(&event.position),
+                    tab.tiled_panes
+                        .acme_title_button_pane_id_at_position(&event.position),
+                    tab.tiled_panes
+                        .acme_wrap_indicator_pane_id_at_position(&event.position),
+                )
+            };
 
         let (pinned_selectable, pinned_unselectable) = if !floating_visible {
             let selectable = tab
@@ -1173,6 +1180,7 @@ impl MouseHandler {
             acme_vertical_border_hit,
             acme_title_pane_id,
             acme_title_button_pane_id,
+            acme_wrap_indicator_pane_id,
             pinned_selectable,
             pinned_unselectable,
             focus_follows_mouse: tab.focus_follows_mouse,
@@ -1287,10 +1295,7 @@ impl MouseHandler {
         } else {
             tab.focus_pane_with_id(drag_state.pane_id, false, false, client_id)?;
             if tab.acme_toggle_title_button_pane(client_id) {
-                tab.move_mouse_from_position_to_pane_control_square(
-                    drag_state.pane_id,
-                    position,
-                );
+                tab.move_mouse_from_position_to_pane_control_square(drag_state.pane_id, position);
             }
             Ok(MouseEffect::state_changed())
         }
@@ -1860,6 +1865,16 @@ impl MouseHandler {
                 tab.close_pane_by_pane_id(pane_id, None)
                     .with_context(err_context)?;
                 Ok(MouseEffect::state_changed_and_kill_session_if_no_selectable_panes())
+            },
+            MouseAction::TogglePaneWrap { pane_id } => {
+                clear_hover_for_client(tab, client_id);
+                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                    pane.toggle_display_wrap();
+                    tab.set_force_render();
+                    Ok(MouseEffect::state_changed())
+                } else {
+                    Ok(MouseEffect::default())
+                }
             },
             MouseAction::PasteFromHostClipboard { pane_id } => {
                 tab.focus_pane_with_id(pane_id, false, false, client_id)?;
@@ -2692,6 +2707,12 @@ impl MouseHandler {
                 .map(|id| id == details.pane_id)
                 .unwrap_or(false);
 
+            if ctx.acme_wrap_indicator_pane_id == Some(details.pane_id) {
+                return Ok(MouseAction::TogglePaneWrap {
+                    pane_id: details.pane_id,
+                });
+            }
+
             if ctx.acme_title_button_pane_id == Some(details.pane_id) {
                 return Ok(MouseAction::StartAcmeHandleDrag {
                     pane_id: details.pane_id,
@@ -3177,6 +3198,7 @@ mod tests {
             acme_vertical_border_hit: false,
             acme_title_pane_id: None,
             acme_title_button_pane_id: None,
+            acme_wrap_indicator_pane_id: None,
             pinned_selectable: None,
             pinned_unselectable: None,
             focus_follows_mouse: false,
@@ -3425,6 +3447,58 @@ mod tests {
             )
             .unwrap(),
             MouseAction::CancelSearch
+        );
+    }
+
+    #[test]
+    fn plain_left_click_on_acme_wrap_indicator_toggles_wrap() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: true,
+            frame_intercepted: false,
+            edge: None,
+            is_acme_title: true,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+        context.acme_wrap_indicator_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_left_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::TogglePaneWrap {
+                pane_id: PaneId::Terminal(1),
+            }
+        );
+    }
+
+    #[test]
+    fn plain_right_click_on_acme_wrap_indicator_is_ignored() {
+        let mut context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        context.clicked_pane = Some(ClickedPaneDetails {
+            pane_id: PaneId::Terminal(1),
+            on_frame: true,
+            frame_intercepted: false,
+            edge: None,
+            is_acme_title: true,
+            is_floating: false,
+            terminal_wants_mouse: false,
+        });
+        context.acme_wrap_indicator_pane_id = Some(PaneId::Terminal(1));
+
+        assert_eq!(
+            MouseHandler::determine_mouse_action(
+                &MouseEvent::new_right_press_event(position),
+                &context,
+            )
+            .unwrap(),
+            MouseAction::NoAction
         );
     }
 
