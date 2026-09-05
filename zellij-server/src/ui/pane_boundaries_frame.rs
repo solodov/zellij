@@ -60,6 +60,15 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
     })
 }
 
+pub(crate) const ATTENTION_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xff, 0xf0, 0xb3));
+pub(crate) const ATTENTION_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x6b, 0x4f, 0x00));
+
+/// Recolor a title without changing its text, geometry, or selection styling.
+pub(crate) fn apply_attention_colors(styles: &mut CharacterStyles) {
+    styles.background = Some(ATTENTION_BACKGROUND);
+    styles.foreground = Some(ATTENTION_FOREGROUND);
+}
+
 const ACME_TITLE_BACKGROUND: AnsiCode = AnsiCode::RgbCode((0xdd, 0xf7, 0xff));
 const ACME_ACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x1f, 0x5b, 0x6a));
 const ACME_INACTIVE_TITLE_FOREGROUND: AnsiCode = AnsiCode::RgbCode((0x4a, 0x74, 0x80));
@@ -345,6 +354,7 @@ pub struct PaneFrame {
     omit_title: bool,
     stack_list_entry: Option<StackListEntry>,
     color_override: Option<PaletteColor>,
+    has_attention: bool,
     mouse_scroll_resize: bool,
     mouse_hover_tips: bool,
     dimmed: bool,
@@ -389,6 +399,7 @@ impl PaneFrame {
             omit_title: frame_params.omit_title,
             stack_list_entry: frame_params.stack_list_entry,
             color_override: None,
+            has_attention: false,
             mouse_scroll_resize: frame_params.mouse_scroll_resize,
             mouse_hover_tips: frame_params.mouse_hover_tips,
             dimmed: frame_params.dimmed,
@@ -397,6 +408,11 @@ impl PaneFrame {
     }
     pub fn is_pinned(mut self, is_pinned: bool) -> Self {
         self.is_pinned = is_pinned;
+        self
+    }
+    /// Highlight only the title while an application notification is unacknowledged.
+    pub fn with_attention(mut self, has_attention: bool) -> Self {
+        self.has_attention = has_attention;
         self
     }
     pub fn add_exit_status(&mut self, exit_status: Option<i32>) {
@@ -438,11 +454,15 @@ impl PaneFrame {
     fn pane_title_characters(&self, characters: &str) -> Vec<TerminalCharacter> {
         self.title_line_characters(characters)
     }
-    fn highlight_title_line_for_mode(
+    fn highlight_title_line(
         &self,
         mut title_line: Vec<TerminalCharacter>,
     ) -> Vec<TerminalCharacter> {
-        if self.title_is_highlighted_for_scroll() {
+        if self.has_attention {
+            for character in &mut title_line {
+                character.styles.update(apply_attention_colors);
+            }
+        } else if self.title_is_highlighted_for_scroll() {
             for character in &mut title_line {
                 character.styles.update(|styles| {
                     styles.background = Some(MODE_TITLE_BACKGROUND);
@@ -1017,7 +1037,7 @@ impl PaneFrame {
             .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
             .or_else(|| Some(self.title_line_without_middle()))
             .with_context(|| format!("failed to render title '{}'", self.title))?;
-        Ok(self.highlight_title_line_for_mode(title_line))
+        Ok(self.highlight_title_line(title_line))
     }
     fn render_stack_list_entry(&self, entry: &StackListEntry) -> Vec<TerminalCharacter> {
         let usable_cols = self.geom.cols;
@@ -1100,6 +1120,11 @@ impl PaneFrame {
             occupied_columns += 1;
         }
         line.append(&mut scroll_part);
+        if self.has_attention {
+            for character in &mut line {
+                character.styles.update(apply_attention_colors);
+            }
+        }
         line
     }
     fn render_one_line_title(&self) -> Result<Vec<TerminalCharacter>> {
@@ -1110,15 +1135,15 @@ impl PaneFrame {
                 .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
                 .or_else(|| Some(self.title_line_without_middle()))
                 .with_context(|| format!("failed to render title '{}'", self.title))?;
-            return Ok(self.highlight_title_line_for_mode(title_line));
+            return Ok(self.highlight_title_line(title_line));
         }
 
         if self.acme_title {
-            return Ok(self.highlight_title_line_for_mode(self.render_acme_title_line()));
+            return Ok(self.highlight_title_line(self.render_acme_title_line()));
         }
 
         if self.frameless_title_fills_width {
-            return Ok(self.highlight_title_line_for_mode(self.title_line_without_middle()));
+            return Ok(self.highlight_title_line(self.title_line_without_middle()));
         }
 
         let width = self.geom.cols;
@@ -1129,7 +1154,7 @@ impl PaneFrame {
         let focus_length = focus.as_ref().map(|(_, length)| *length).unwrap_or(0);
         let right_budget = width.saturating_sub(focus_length + title_length);
         let right = self.bracketed_scroll_indicator(right_budget);
-        Ok(self.highlight_title_line_for_mode(self.compose_bracketed_title(focus, title, right)))
+        Ok(self.highlight_title_line(self.compose_bracketed_title(focus, title, right)))
     }
     fn render_acme_title_line(&self) -> Vec<TerminalCharacter> {
         render_acme_title_line_for_pane(
@@ -1811,6 +1836,53 @@ mod tests {
 
         let text = characters_to_string(&frame.render_one_line_title().unwrap());
         assert_eq!(text, "    termflow    ");
+    }
+
+    #[test]
+    fn attention_recolors_titles_without_changing_text_or_selection_style() {
+        for active in [false, true] {
+            for mode in [false, true] {
+                for cols in [1, 4, 16, 40] {
+                    let mut frame = pane_frame_with(false, false, cols);
+                    frame.title = "shiny 日本語".to_owned();
+                    frame.should_draw_pane_frames = false;
+                    frame.acme_title = true;
+                    frame.is_main_client = active;
+                    frame.title_mode_highlight = mode;
+                    let normal = frame.render_one_line_title().unwrap();
+                    frame.has_attention = true;
+                    let highlighted = frame.render_one_line_title().unwrap();
+                    assert_eq!(normal.len(), highlighted.len());
+                    for (before, after) in normal.iter().zip(&highlighted) {
+                        assert_eq!(before.character, after.character);
+                        assert_eq!(before.width, after.width);
+                        assert_eq!(before.styles.bold, after.styles.bold);
+                        assert_eq!(before.styles.underline, after.styles.underline);
+                        assert_eq!(after.styles.background, Some(ATTENTION_BACKGROUND));
+                        assert_eq!(after.styles.foreground, Some(ATTENTION_FOREGROUND));
+                    }
+                    frame.has_attention = false;
+                    assert_eq!(normal, frame.render_one_line_title().unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attention_highlights_collapsed_stack_entries() {
+        let mut frame = pane_frame_with(false, false, 40);
+        let entry = StackListEntry {
+            width: 20,
+            label: "shiny".to_owned(),
+            is_selected: false,
+            is_emphasized: false,
+            stack_is_focused: false,
+        };
+        let normal = frame.render_stack_list_entry(&entry);
+        frame.has_attention = true;
+        let highlighted = frame.render_stack_list_entry(&entry);
+        assert_eq!(characters_to_string(&normal), characters_to_string(&highlighted));
+        assert!(highlighted.iter().all(|c| c.styles.background == Some(ATTENTION_BACKGROUND)));
     }
 
     #[test]

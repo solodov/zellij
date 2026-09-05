@@ -775,6 +775,12 @@ pub trait Pane {
     fn hold(&mut self, _exit_status: Option<i32>, _is_first_run: bool, _run_command: RunCommand) {
         // No-op by default, only terminal panes support holding
     }
+    /// Whether an explicit application notification is waiting to be acknowledged.
+    fn has_attention(&self) -> bool {
+        false
+    }
+    /// Set silent attention independently of terminal bell and frame flash state.
+    fn set_attention(&mut self, _attention: bool) {}
     fn has_bell(&self) -> bool {
         false
     }
@@ -4194,6 +4200,29 @@ impl Tab {
                 .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
         }
     }
+    /// Derive tab attention from its panes, including hidden and floating panes.
+    pub fn has_pending_attention(&self) -> bool {
+        self.tiled_panes
+            .get_panes()
+            .chain(self.floating_panes.get_panes())
+            .map(|(_, pane)| pane)
+            .chain(self.suppressed_panes.values().map(|(_, pane)| pane))
+            .any(|pane| pane.has_attention())
+    }
+
+    /// Update pane-owned attention so it follows moves and disappears on pane closure.
+    pub fn set_pane_attention(&mut self, pane_id: PaneId, attention: bool) -> bool {
+        let Some(pane) = self.get_pane_with_id_mut(pane_id) else {
+            return false;
+        };
+        if pane.has_attention() == attention {
+            return false;
+        }
+        pane.set_attention(attention);
+        self.set_force_render();
+        true
+    }
+
     pub fn check_and_handle_bell_notifications(
         &mut self,
         is_active_tab: bool,

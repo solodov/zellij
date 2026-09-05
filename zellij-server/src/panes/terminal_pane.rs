@@ -155,6 +155,7 @@ pub struct TerminalPane {
     // held on startup and can possibly be used to display some errors
     pane_frame_color_override: Option<(PaletteColor, Option<String>)>,
     has_bell_notification: bool,
+    has_attention: bool,
     invoked_with: Option<Run>,
     #[allow(dead_code)]
     arrow_fonts: bool,
@@ -594,7 +595,8 @@ impl Pane for TerminalPane {
             pane_title,
             frame_params,
         )
-        .is_pinned(is_pinned);
+        .is_pinned(is_pinned)
+        .with_attention(self.has_attention);
         if let Some((exit_status, is_first_run, _run_command)) = &self.is_held {
             if *is_first_run {
                 frame.indicate_first_run();
@@ -1160,6 +1162,13 @@ impl Pane for TerminalPane {
         }
         self.set_should_render(true);
     }
+    fn has_attention(&self) -> bool {
+        self.has_attention
+    }
+    fn set_attention(&mut self, attention: bool) {
+        self.has_attention = attention;
+        self.set_should_render(true);
+    }
     fn has_bell(&self) -> bool {
         self.grid.ring_bell
     }
@@ -1480,6 +1489,7 @@ impl TerminalPane {
             banner: None,
             pane_frame_color_override: None,
             has_bell_notification: false,
+            has_attention: false,
             invoked_with,
             arrow_fonts,
             notification_end,

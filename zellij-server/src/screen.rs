@@ -88,6 +88,7 @@ use crate::panes::nested_session_modal::GuestModalShortcuts;
 use crate::panes::terminal_character::{AnsiCode, RcCharacterStyles, TerminalCharacter};
 use crate::panes::terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END};
 use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+use crate::ui::pane_boundaries_frame::apply_attention_colors;
 
 use crate::{
     nested_guest::NestedGuestTracker,
@@ -2322,7 +2323,7 @@ impl Screen {
                 self.active_tab_ids.insert(client_id, new_tab_index);
             },
         }
-        self.clear_bell_for_focused_pane(client_id);
+        self.acknowledge_focused_pane(client_id);
     }
 
     /// A helper function to switch to a new tab at specified position.
@@ -2377,7 +2378,6 @@ impl Screen {
                             .map(|(c, _i)| *c)
                             .collect();
                         for client_id in all_connected_clients {
-                            self.update_client_tab_focus(client_id, new_tab_index);
                             match (
                                 should_change_pane_focus,
                                 self.get_indexed_tab_mut(new_tab_index),
@@ -2387,6 +2387,7 @@ impl Screen {
                                 },
                                 _ => {},
                             }
+                            self.update_client_tab_focus(client_id, new_tab_index);
                         }
                     } else {
                         self.move_clients_between_tabs(
@@ -4649,20 +4650,29 @@ impl Screen {
             } else {
                 ACME_INACTIVE_TAB_BUTTON
             };
-            let style = if segment.active {
-                &active_style
-            } else {
-                &normal_style
-            };
-            let name_style = if Some(segment.tab_id) == tab_id_being_renamed {
+            let base_style = if segment.active { &active_style } else { &normal_style };
+            let mut style = base_style.clone();
+            let has_attention = self.tabs.get(&segment.tab_id)
+                .map(|tab| tab.has_pending_attention())
+                .unwrap_or(false);
+            if has_attention {
+                style.update(apply_attention_colors);
+                // The preceding padding cell belongs to this label's highlight, not its geometry.
+                if let Some(character) = row.last_mut() {
+                    character.styles.update(apply_attention_colors);
+                }
+            }
+            let name_style = if !has_attention && Some(segment.tab_id) == tab_id_being_renamed {
                 &rename_style
             } else {
-                style
+                &style
             };
-            push_acme_tab_bar_char(&mut row, tab_button, style, cols);
-            push_acme_tab_bar_spaces(&mut row, ACME_TAB_BUTTON_NAME_SPACES, style, cols);
+            push_acme_tab_bar_char(&mut row, tab_button, &style, cols);
+            push_acme_tab_bar_spaces(&mut row, ACME_TAB_BUTTON_NAME_SPACES, &style, cols);
             push_acme_tab_bar_text(&mut row, &segment.name, name_style, cols);
-            push_acme_tab_bar_spaces(&mut row, ACME_TAB_TRAILING_SPACES, style, cols);
+            push_acme_tab_bar_spaces(&mut row, 1, &style, cols);
+            let trailing_style = if has_attention { base_style } else { &style };
+            push_acme_tab_bar_spaces(&mut row, ACME_TAB_TRAILING_SPACES - 1, trailing_style, cols);
         }
         while row.iter().map(|character| character.width()).sum::<usize>() < cols {
             push_acme_tab_bar_char(&mut row, ' ', &normal_style, cols);
@@ -5184,6 +5194,9 @@ impl Screen {
     pub fn host_terminal_focus_changed(&mut self, client_id: ClientId, focused: bool) {
         let was_focused = self.client_host_is_focused(&client_id);
         self.client_host_focused.insert(client_id, focused);
+        if focused && !was_focused && self.acknowledge_focused_pane_attention(client_id) {
+            self.render(None).non_fatal();
+        }
         if !focused {
             let cleared = self
                 .get_active_tab_mut(client_id)
@@ -5269,6 +5282,49 @@ impl Screen {
             .unwrap_or_else(|| {
                 NotificationProtocol::resolve(self.host_notification_protocol, &BTreeMap::new())
             })
+    }
+
+    /// Handle local attention independently of host notification delivery and bell settings.
+    fn handle_desktop_notifications(&mut self, notifications: Vec<PendingNotification>, terminal_id: u32) {
+        let pane_id = PaneId::Terminal(terminal_id);
+        let is_attended = self.active_tab_ids.keys().any(|client_id| {
+            !self.watcher_clients.contains_key(client_id)
+                && self.client_host_is_focused(client_id)
+                && self.get_active_pane_id(client_id) == Some(pane_id)
+        });
+        let mut attention_changed = false;
+        if !is_attended && notifications.iter().any(PendingNotification::requests_attention) {
+            for tab in self.tabs.values_mut() {
+                if tab.set_pane_attention(pane_id, true) {
+                    attention_changed = true;
+                    break;
+                }
+            }
+        }
+        self.forward_desktop_notifications(notifications, terminal_id);
+        if attention_changed {
+            self.render(None).non_fatal();
+        }
+    }
+
+    /// Acknowledge only the pane actually selected in a focused, non-watcher client.
+    fn acknowledge_focused_pane_attention(&mut self, client_id: ClientId) -> bool {
+        if self.watcher_clients.contains_key(&client_id) || !self.client_host_is_focused(&client_id) {
+            return false;
+        }
+        let Ok(tab) = self.get_active_tab_mut(client_id) else {
+            return false;
+        };
+        let Some(pane_id) = tab.get_active_pane_id(client_id) else {
+            return false;
+        };
+        tab.set_pane_attention(pane_id, false)
+    }
+
+    /// Pane focus acknowledges both silent attention and legacy bell markers.
+    fn acknowledge_focused_pane(&mut self, client_id: ClientId) {
+        self.acknowledge_focused_pane_attention(client_id);
+        self.clear_bell_for_focused_pane(client_id);
     }
 
     fn forward_desktop_notifications(
@@ -8125,6 +8181,9 @@ impl Screen {
         }) {
             Ok(mouse_effect) => {
                 let mut should_render = false;
+                if event.event_type == MouseEventType::Press && (event.left || event.middle || event.right) {
+                    should_render |= self.acknowledge_focused_pane_attention(client_id);
+                }
                 if let Some(pane_id) = mouse_effect.group_toggle {
                     if self.advanced_mouse_actions {
                         self.toggle_pane_id_in_group(pane_id, &client_id);
@@ -8159,7 +8218,7 @@ impl Screen {
                     if active_pane_id_before.is_some()
                         && active_pane_id_before != active_pane_id_after
                     {
-                        self.clear_bell_for_focused_pane(client_id);
+                        self.acknowledge_focused_pane(client_id);
                         if let (Some(old), Some(new)) =
                             (active_pane_id_before, active_pane_id_after)
                         {
@@ -9351,7 +9410,7 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::ToggleFloatingPanes(client_id, default_shell, completion_tx) => {
                 active_tab_and_connected_client_id!(screen, client_id, |tab: &mut Tab, client_id: ClientId| tab
                     .toggle_floating_panes(Some(client_id), default_shell, completion_tx), ?);
-                screen.clear_bell_for_focused_pane(client_id);
+                screen.acknowledge_focused_pane(client_id);
                 screen.sync_scroll_mode_on_focus(client_id)?;
                 screen.log_and_report_session_state()?;
 
@@ -9599,7 +9658,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -9627,7 +9686,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -9662,7 +9721,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -9697,7 +9756,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -9725,7 +9784,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -9760,7 +9819,7 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
-                    screen.clear_bell_for_focused_pane(client_id);
+                    screen.acknowledge_focused_pane(client_id);
                     screen.add_active_pane_to_group_if_marking(&client_id);
                     screen.sync_scroll_mode_on_focus(client_id)?;
                     screen.render(None)?;
@@ -11277,7 +11336,7 @@ pub(crate) fn screen_thread_main(
                 pane_id,
                 notifications,
             } => {
-                screen.forward_desktop_notifications(notifications, pane_id);
+                screen.handle_desktop_notifications(notifications, pane_id);
             },
             ScreenInstruction::PreviousSwapLayout(
                 client_id,
@@ -12100,6 +12159,7 @@ pub(crate) fn screen_thread_main(
                             should_be_in_place_if_hidden,
                             client_id,
                         )?;
+                        screen.acknowledge_focused_pane_attention(client_id);
                         screen.clear_bell_for_pane_id(pane_id, client_id);
                         screen.reconcile_single_pane_focus(client_id);
                         screen.sync_scroll_mode_on_focus(client_id)?;

@@ -63,6 +63,9 @@ use std::rc::Rc;
 use zellij_utils::data::{PaneContents, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
 
+#[path = "attention_tests.rs"]
+mod attention_tests;
+
 fn take_snapshot_and_cursor_coordinates(
     ansi_instructions: &str,
     grid: &mut Grid,

@@ -75,6 +75,18 @@ pub enum PendingNotification {
 }
 
 impl PendingNotification {
+    /// Whether this is a complete display notification, rather than protocol control traffic.
+    pub fn requests_attention(&self) -> bool {
+        match self {
+            Self::Osc99 { display, .. } => display
+                .as_ref()
+                .map(|(title, body)| !title.is_empty() || !body.is_empty())
+                .unwrap_or(false),
+            Self::Osc9 { body } => !body.is_empty(),
+            Self::Osc777 { title, body } => !title.is_empty() || !body.is_empty(),
+        }
+    }
+
     pub fn title_and_body(&self) -> (String, String) {
         match self {
             PendingNotification::Osc99 { display, .. } => display.clone().unwrap_or_default(),
