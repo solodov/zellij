@@ -196,6 +196,25 @@ impl Selection {
         self.start == self.end
     }
 
+    /// Whether the moving endpoint is still following a mouse drag.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Translate every anchor while retaining drag and word-selection state.
+    pub fn map_positions(mut self, map: impl Fn(Position) -> Position) -> Self {
+        self.start = map(self.start);
+        self.end = map(self.end);
+        self.last_added_word_position = self.last_added_word_position
+            .map(|(start, end)| (map(start), map(end)));
+        self.last_added_line_index = self.last_added_line_index.map(|line| {
+            let mut position = Position::default();
+            position.change_line(line);
+            map(position).line.0
+        });
+        self
+    }
+
     pub fn reset(&mut self) {
         self.start = Position::new(0, 0);
         self.end = self.start;

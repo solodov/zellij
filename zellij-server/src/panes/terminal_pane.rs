@@ -949,11 +949,11 @@ impl Pane for TerminalPane {
 
         // TODO: check how far up/down mouse is relative to pane, to increase scroll lines?
         if cursor_at_the_bottom {
-            self.grid.scroll_up_one_line();
+            self.grid.move_viewport_up(1);
             self.selection_scrolled_at = time::Instant::now();
             self.set_should_render(true);
         } else if cursor_at_the_top {
-            self.grid.scroll_down_one_line();
+            self.grid.move_viewport_down(1);
             self.selection_scrolled_at = time::Instant::now();
             self.set_should_render(true);
         } else if cursor_in_the_middle {

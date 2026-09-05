@@ -38,6 +38,8 @@ use zellij_utils::{
     position::Position,
 };
 
+mod display_wrap;
+
 const TABSTOP_WIDTH: usize = 8; // TODO: is this always right?
 pub const MAX_TITLE_STACK_SIZE: usize = 1000;
 // Acme-like selection uses a soft background while preserving foreground colors.
@@ -818,11 +820,6 @@ enum RegionRowsScrolled {
     Nothing,
 }
 
-struct DisplayWrapProjection {
-    rows: Vec<Row>,
-    cursor_coordinates: Option<(usize, usize)>,
-}
-
 #[derive(Clone, Copy)]
 struct KittyRowSnapshot {
     lines_above_len: usize,
@@ -1397,6 +1394,9 @@ impl Grid {
         self.cursor.get_shape()
     }
     pub fn scrollback_position_and_length(&self) -> (usize, usize) {
+        if self.uses_unwrapped_display() {
+            return self.display_wrap_projection().scrollback_position_and_length();
+        }
         // (position, length)
         (
             self.lines_below.len(),
@@ -1562,44 +1562,6 @@ impl Grid {
         let rows_below_the_viewport = self.kitty_rows_below_the_viewport();
         self.kitty_grid
             .settle_placements_below_the_viewport(rows_below_the_viewport)
-    }
-    fn display_wrap_projection(&self) -> DisplayWrapProjection {
-        let mut rows: Vec<Row> = self.lines_above.iter().cloned().collect();
-        let mut cursor_logical_position = None;
-        let mut current_logical_row = rows.len().checked_sub(1);
-
-        for (viewport_row_index, row) in self.viewport.iter().enumerate() {
-            let starts_logical_row = row.is_canonical || current_logical_row.is_none();
-            if starts_logical_row {
-                let mut projected_row = row.clone();
-                projected_row.is_canonical = true;
-                rows.push(projected_row);
-                let logical_row_index = rows.len().saturating_sub(1);
-                current_logical_row = Some(logical_row_index);
-                if viewport_row_index == self.cursor.y {
-                    cursor_logical_position = Some((logical_row_index, self.cursor.x));
-                }
-            } else if let Some(logical_row_index) = current_logical_row {
-                let row_start_column = rows[logical_row_index].width();
-                if viewport_row_index == self.cursor.y {
-                    cursor_logical_position =
-                        Some((logical_row_index, row_start_column + self.cursor.x));
-                }
-                let mut row_to_append = row.clone();
-                rows[logical_row_index].append(&mut row_to_append);
-            }
-        }
-
-        let first_visible_row = rows.len().saturating_sub(self.height);
-        let cursor_coordinates = cursor_logical_position.and_then(|(row_index, column)| {
-            (row_index >= first_visible_row && row_index < first_visible_row + self.height)
-                .then_some((column, row_index - first_visible_row))
-        });
-        let rows = rows.into_iter().skip(first_visible_row).collect();
-        DisplayWrapProjection {
-            rows,
-            cursor_coordinates,
-        }
     }
     fn kitty_reanchor_all_from_pixels(&mut self) {
         self.kitty_settle_placements_below_the_viewport();
@@ -2035,9 +1997,9 @@ impl Grid {
                     y_offset,
                 )
             } else {
-                let projection = self.display_wrap_projection();
+                let rows = self.display_wrap_projection().visible_rows();
                 self.output_buffer.changed_chunks_in_viewport(
-                    &projection.rows,
+                    &rows,
                     self.width,
                     self.height,
                     x_offset,
@@ -2128,7 +2090,24 @@ impl Grid {
         let (mut character_chunks, sixel_image_chunks, kitty_image_chunks) =
             self.read_changes(content_x, content_y);
 
-        let plugin_highlight_selections = self.compute_plugin_highlight_selections();
+        let projection = self
+            .uses_unwrapped_display()
+            .then(|| self.display_wrap_projection());
+        let project_selection = |selection| {
+            projection
+                .as_ref()
+                .map(|projection| projection.selection_to_display(selection))
+                .unwrap_or(selection)
+        };
+        let selection = project_selection(self.selection);
+        let search_selections: Vec<_> = self.search_results.selections.iter().copied()
+            .map(project_selection).collect();
+        let active_search_selection = self.search_results.active.map(project_selection);
+        let command_output_flash = self.command_output_flash.map(project_selection);
+        let mut plugin_highlight_selections = self.compute_plugin_highlight_selections();
+        for highlight in &mut plugin_highlight_selections {
+            highlight.selection = project_selection(highlight.selection);
+        }
 
         for character_chunk in character_chunks.iter_mut() {
             character_chunk.add_changed_colors(self.changed_colors);
@@ -2141,13 +2120,11 @@ impl Grid {
                 self.pane_default_fg.map(AnsiCode::RgbCode),
                 self.pane_default_bg.map(AnsiCode::RgbCode),
             );
-            if self
-                .selection
-                .contains_row(character_chunk.y.saturating_sub(content_y))
+            if selection.contains_row(character_chunk.y.saturating_sub(content_y))
             {
                 character_chunk.add_selection_and_colors(
                     HighlightSelection {
-                        selection: self.selection,
+                        selection,
                         bg: Some(TEXT_SELECTION_BACKGROUND),
                         fg: None,
                         bold: false,
@@ -2158,11 +2135,11 @@ impl Grid {
                     content_x,
                     content_y,
                 );
-            } else if !self.search_results.selections.is_empty() {
-                for res in self.search_results.selections.iter() {
+            } else if !search_selections.is_empty() {
+                for res in search_selections.iter() {
                     if res.contains_row(character_chunk.y.saturating_sub(content_y)) {
                         let (background_color, foreground_color) =
-                            if Some(res) == self.search_results.active.as_ref() {
+                            if Some(res) == active_search_selection.as_ref() {
                                 (
                                     ACTIVE_SEARCH_MATCH_BACKGROUND,
                                     ACTIVE_SEARCH_MATCH_FOREGROUND,
@@ -2186,7 +2163,7 @@ impl Grid {
                     }
                 }
             }
-            if let Some(command_output_flash) = self.command_output_flash {
+            if let Some(command_output_flash) = command_output_flash {
                 if command_output_flash.contains_row(character_chunk.y.saturating_sub(content_y)) {
                     let foreground_color = match style.colors.text_unselected.emphasis_0 {
                         PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
@@ -2230,7 +2207,8 @@ impl Grid {
     /// when the app has hidden it. The bool is true when the cursor is visible.
     pub fn cursor_coordinates(&self) -> Option<(usize, usize, bool)> {
         if !self.display_wrap_enabled && self.alternate_screen_state.is_none() {
-            let (x, y) = self.display_wrap_projection().cursor_coordinates?;
+            let (x, y) = self.display_wrap_projection()
+                .cursor_coordinates(self.cursor.x, self.cursor.y)?;
             if x >= self.width || y >= self.height {
                 None
             } else {
@@ -2280,13 +2258,21 @@ impl Grid {
         scrollback.push_str(&viewport);
         scrollback
     }
+    /// Scroll by displayed lines without changing terminal wrapping.
     pub fn move_viewport_up(&mut self, count: usize) {
+        if self.scroll_unwrapped_lines(count, true) {
+            return;
+        }
         for _ in 0..count {
             self.scroll_up_one_line();
         }
         self.output_buffer.update_all_lines();
     }
+    /// Scroll by displayed lines, clamping at the live viewport.
     pub fn move_viewport_down(&mut self, count: usize) {
+        if self.scroll_unwrapped_lines(count, false) {
+            return;
+        }
         for _ in 0..count {
             self.scroll_down_one_line();
         }
@@ -3268,7 +3254,12 @@ impl Grid {
         selections
     }
 
+    /// Start mouse selection at a displayed cell.
     pub fn start_selection(&mut self, start: &Position) {
+        if self.uses_unwrapped_display() {
+            self.start_unwrapped_selection(start);
+            return;
+        }
         let old_selection = self.selection;
         self.click.record_click(*start);
 
@@ -3306,7 +3297,12 @@ impl Grid {
         self.update_selected_lines(&old_selection, &self.selection.clone());
         self.mark_for_rerender();
     }
+    /// Extend mouse selection to a displayed cell.
     pub fn update_selection(&mut self, to: &Position) {
+        if self.uses_unwrapped_display() {
+            self.update_unwrapped_selection(to);
+            return;
+        }
         let old_selection = self.selection;
         if &old_selection.end != to {
             if self.click.is_double_click() {
@@ -3337,7 +3333,10 @@ impl Grid {
         }
     }
 
+    /// Finalize mouse selection, translating the displayed endpoint to stored text.
     pub fn end_selection(&mut self, end: &Position) {
+        let end = self.display_position_to_buffer(*end);
+        let end = &end;
         if !self.click.is_double_click() && !self.click.is_triple_click() {
             let old_selection = self.selection;
             self.selection.end(*end);
@@ -3377,6 +3376,9 @@ impl Grid {
     }
 
     fn text_for_selection(&self, selection: &Selection) -> Option<String> {
+        if self.uses_unwrapped_display() {
+            return self.display_wrap_projection().selected_text(selection);
+        }
         if selection.is_empty() {
             return None;
         }
@@ -3525,6 +3527,9 @@ impl Grid {
         Some(position_row.last_index_in_line())
     }
     pub fn word_around_position(&self, position: &Position) -> Option<(Position, Position)> {
+        if self.uses_unwrapped_display() {
+            return self.display_wrap_projection().word_at(*position, &self.word_separators);
+        }
         let position_row = self.viewport.get(position.line.0 as usize)?;
         let (index_start, index_end) = position_row
             .word_indices_around_character_index(position.column.0, &self.word_separators)?;
@@ -3571,6 +3576,9 @@ impl Grid {
         &self,
         position: &Position,
     ) -> Option<(Position, Position)> {
+        if self.uses_unwrapped_display() {
+            return self.display_wrap_projection().line_at(*position);
+        }
         let position_row = self.viewport.get(position.line.0 as usize)?;
 
         let mut position_start = Position::new(position.line.0 as i32, 0);
