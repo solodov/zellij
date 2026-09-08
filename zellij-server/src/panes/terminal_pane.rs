@@ -153,6 +153,8 @@ pub struct TerminalPane {
     // possible user instruction to be re-run, or that the command has not yet been run
     banner: Option<String>, // a banner to be rendered inside this TerminalPane, used for panes
     // held on startup and can possibly be used to display some errors
+    // Keep the saved contents separate from the startup banner until the first command starts.
+    initial_contents: Option<String>,
     pane_frame_color_override: Option<(PaletteColor, Option<String>)>,
     has_bell_notification: bool,
     has_attention: bool,
@@ -1250,17 +1252,16 @@ impl Pane for TerminalPane {
         self.set_should_render(true);
     }
     fn serialize(&self, scrollback_lines_to_serialize: Option<usize>) -> Option<String> {
-        self.grid.serialize(scrollback_lines_to_serialize)
+        self.initial_contents
+            .clone()
+            .or_else(|| self.grid.serialize(scrollback_lines_to_serialize))
     }
     fn rerun(&mut self) -> Option<RunCommand> {
         // if this is a command pane that has exited or is waiting to be rerun, will return its
         // RunCommand, otherwise it is safe to assume this is not the right sort of pane or that it
         // is not in the right sort of state
         self.is_held.take().map(|(_, _, run_command)| {
-            self.is_held = None;
-            self.grid.reset_terminal_state();
-            self.set_should_render(true);
-            self.remove_banner();
+            self.reset_for_command();
             run_command.clone()
         })
     }
@@ -1487,6 +1488,7 @@ impl TerminalPane {
             search_term: String::new(),
             is_held: None,
             banner: None,
+            initial_contents: None,
             pane_frame_color_override: None,
             has_bell_notification: false,
             has_attention: false,
@@ -1501,6 +1503,14 @@ impl TerminalPane {
             guest_modal_shortcuts: GuestModalShortcuts::default(),
             pending_pty_input: VecDeque::new(),
             kitty_interceptor: KittyApcInterceptor::new(),
+        }
+    }
+    /// Loads saved output, retaining it through the startup banner only for held panes.
+    pub fn restore_initial_contents(&mut self, contents: &str, hold_for_command: bool) {
+        self.handle_pty_bytes(contents.as_bytes().into());
+        self.handle_pty_bytes(b"\n\r".to_vec());
+        if hold_for_command {
+            self.initial_contents = Some(contents.to_owned());
         }
     }
     pub fn get_x(&self) -> usize {
@@ -1549,6 +1559,10 @@ impl TerminalPane {
         self.grid.cursor_coordinates()
     }
     fn render_first_run_banner(&mut self) {
+        if let Some(contents) = self.initial_contents.clone() {
+            self.grid.reset_terminal_state();
+            self.restore_initial_contents(&contents, false);
+        }
         let columns = self.get_content_columns();
         let rows = self.get_content_rows();
         let banner = match &self.is_held {
@@ -1560,12 +1574,14 @@ impl TerminalPane {
         self.banner = Some(banner.clone());
         self.handle_pty_bytes(banner.as_bytes().to_vec());
     }
-    fn remove_banner(&mut self) {
-        if self.banner.is_some() {
-            self.grid.reset_terminal_state();
-            self.set_should_render(true);
-            self.banner = None;
+    /// Resets for a new process without losing saved output or retaining the startup banner.
+    fn reset_for_command(&mut self) {
+        self.grid.reset_terminal_state();
+        self.banner = None;
+        if let Some(contents) = self.initial_contents.take() {
+            self.restore_initial_contents(&contents, false);
         }
+        self.set_should_render(true);
     }
     fn adjust_input_to_terminal_with_kitty_keyboard_protocol(
         &self,
@@ -1674,10 +1690,7 @@ impl TerminalPane {
     }
     fn handle_held_run(&mut self) -> Option<AdjustedInput> {
         self.is_held.take().map(|(_, _, run_command)| {
-            self.is_held = None;
-            self.grid.reset_terminal_state();
-            self.set_should_render(true);
-            self.remove_banner();
+            self.reset_for_command();
             if run_command.originating_plugin.is_some() {
                 // Plugin command panes keep direct rerun semantics for plugin lifecycle events.
                 AdjustedInput::ReRunCommandInThisPane(run_command.clone())
@@ -1690,10 +1703,7 @@ impl TerminalPane {
         self.is_held.take().map(|(_, _, run_command)| {
             // Drop to shell in the same working directory as the command was run
             let working_dir = run_command.cwd.clone();
-            self.is_held = None;
-            self.grid.reset_terminal_state();
-            self.set_should_render(true);
-            self.remove_banner();
+            self.reset_for_command();
             AdjustedInput::DropToShellInThisPane { working_dir }
         })
     }
@@ -1702,6 +1712,10 @@ impl TerminalPane {
 #[cfg(test)]
 #[path = "./unit/terminal_pane_tests.rs"]
 mod grid_tests;
+
+#[cfg(test)]
+#[path = "./unit/terminal_pane_resurrection_tests.rs"]
+mod resurrection_tests;
 
 #[cfg(test)]
 #[path = "./unit/search_in_pane_tests.rs"]

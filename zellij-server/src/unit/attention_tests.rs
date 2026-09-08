@@ -162,7 +162,7 @@ fn tab_attention_recolors_only_the_label_without_changing_geometry() {
             for (column, (before, after)) in normal.terminal_characters.iter()
                 .zip(&highlighted.terminal_characters).enumerate() {
                 assert_eq!(before.character, after.character);
-                assert_eq!(before.width, after.width);
+                assert_eq!(before.width(), after.width());
                 assert_eq!(before.styles.bold, after.styles.bold);
                 assert_eq!(before.styles.underline, after.styles.underline);
                 if cols > 1 && column < 9 {

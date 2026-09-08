@@ -1855,7 +1855,7 @@ mod tests {
                     assert_eq!(normal.len(), highlighted.len());
                     for (before, after) in normal.iter().zip(&highlighted) {
                         assert_eq!(before.character, after.character);
-                        assert_eq!(before.width, after.width);
+                        assert_eq!(before.width(), after.width());
                         assert_eq!(before.styles.bold, after.styles.bold);
                         assert_eq!(before.styles.underline, after.styles.underline);
                         assert_eq!(after.styles.background, Some(ATTENTION_BACKGROUND));
