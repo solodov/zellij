@@ -1101,36 +1101,34 @@ impl TiledPanes {
         self.acme_insert_pane_below_error(target_pane_id).is_none()
     }
 
+    /// Checks whether the column has room for an expanded pane below the target.
     pub fn acme_insert_pane_below_error(&self, target_pane_id: PaneId) -> Option<String> {
         let columns = match self.acme_columns() {
             Ok(columns) => columns,
             Err(_) => return Some("NOT AN ACME LAYOUT".into()),
         };
-        let Some((column, target_pane_index, focused_geom)) = columns.iter().find_map(|column| {
+        let Some((column, target_pane_index)) = columns.iter().find_map(|column| {
             column
                 .pane_geometries
                 .iter()
-                .enumerate()
-                .find(|(_, pane_geometry)| pane_geometry.pane_id == target_pane_id)
-                .map(|(pane_index, pane_geometry)| (column, pane_index, pane_geometry.geom))
+                .position(|pane_geometry| pane_geometry.pane_id == target_pane_id)
+                .map(|pane_index| (column, pane_index))
         }) else {
             return Some("FOCUS AN ACME PANE".into());
         };
-        if !focused_geom.rows.is_percent() {
-            return Some("EXPAND PANE BEFORE SPLIT".into());
-        }
         let mut row_heights: Vec<usize> = column
             .pane_geometries
             .iter()
             .map(|pane_geometry| pane_geometry.geom.rows.as_usize())
             .collect();
-        row_heights.insert(target_pane_index + 1, focused_geom.rows.as_usize());
+        row_heights.insert(target_pane_index + 1, MIN_TERMINAL_HEIGHT);
         if !self.can_equalize_acme_pane_rows(&row_heights) {
             return Some("ACME PANE TOO SHORT".into());
         }
         None
     }
 
+    /// Inserts an expanded pane below the target without expanding collapsed siblings.
     pub fn insert_acme_pane_below(
         &mut self,
         target_pane_id: PaneId,
@@ -1148,20 +1146,19 @@ impl TiledPanes {
             .position(|pane_geometry| pane_geometry.pane_id == target_pane_id)
             .ok_or_else(|| anyhow!("Focused pane is not in an Acme column"))?;
         let focused_geom = column.pane_geometries[target_pane_index].geom;
-        if !focused_geom.rows.is_percent() {
-            return Err(anyhow!("Expand Acme pane before splitting it"));
-        }
         let mut row_heights: Vec<usize> = column
             .pane_geometries
             .iter()
             .map(|pane_geometry| pane_geometry.geom.rows.as_usize())
             .collect();
-        row_heights.insert(target_pane_index + 1, focused_geom.rows.as_usize());
+        row_heights.insert(target_pane_index + 1, MIN_TERMINAL_HEIGHT);
         if !self.can_equalize_acme_pane_rows(&row_heights) {
             return Err(anyhow!("Not enough room for another Acme pane"));
         }
 
         let mut new_geom = focused_geom;
+        // Row equalization must count the new pane as expanded even if its target is collapsed.
+        new_geom.rows = percent_dimension(MIN_TERMINAL_HEIGHT, self.viewport.borrow().rows);
         new_geom.logical_position = None;
         pane.set_geom(new_geom);
         self.panes.insert(pane_id, pane);
