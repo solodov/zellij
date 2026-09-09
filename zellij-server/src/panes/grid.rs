@@ -2049,34 +2049,85 @@ impl Grid {
             kitty_image_chunks,
         )
     }
+    /// Serializes saved output, omitting a trailing OSC 133 prompt only when its input is empty.
     pub fn serialize(&self, scrollback_lines_to_serialize: Option<usize>) -> Option<String> {
-        match scrollback_lines_to_serialize {
-            Some(scrollback_lines_to_serialize) => {
-                let first_index = if scrollback_lines_to_serialize == 0 {
-                    0
+        let first_index = match scrollback_lines_to_serialize {
+            Some(0) => 0,
+            Some(lines) => self.lines_above.len().saturating_sub(lines),
+            None => self.lines_above.len(),
+        };
+        let mut to_serialize: Vec<Row> = self
+            .lines_above
+            .iter()
+            .chain(self.viewport.iter())
+            .skip(first_index)
+            .cloned()
+            .collect();
+        if let Some((prompt_line, prompt_column)) = self.trailing_idle_prompt_start() {
+            let first_line = first_index as isize - self.lines_above.len() as isize;
+            if prompt_line < first_line {
+                to_serialize.clear();
+            } else {
+                let prompt_index = (prompt_line - first_line) as usize;
+                if prompt_column == 0 {
+                    to_serialize.truncate(prompt_index);
                 } else {
-                    self.lines_above
-                        .len()
-                        .saturating_sub(scrollback_lines_to_serialize)
-                };
-                let mut to_serialize = vec![];
-                for line in self.lines_above.iter().skip(first_index) {
-                    to_serialize.push(line.clone());
+                    to_serialize.truncate(prompt_index + 1);
+                    if let Some(row) = to_serialize.last_mut() {
+                        let character_index = row.absolute_character_index(prompt_column);
+                        row.columns.truncate(character_index);
+                        row.width = None;
+                    }
                 }
-                for line in &self.viewport {
-                    to_serialize.push(line.clone())
-                }
-                self.output_buffer
-                    .serialize(to_serialize.as_slice(), self.osc8_hyperlinks, None)
-                    .ok()
-            },
-            None => {
-                let viewport_vec: Vec<Row> = self.viewport.iter().cloned().collect();
-                self.output_buffer
-                    .serialize(&viewport_vec, self.osc8_hyperlinks, None)
-                    .ok()
-            },
+            }
         }
+        self.output_buffer
+            .serialize(&to_serialize, self.osc8_hyperlinks, None)
+            .ok()
+    }
+
+    /// Finds a complete prompt/input pair at the idle cursor, with no input or later output.
+    fn trailing_idle_prompt_start(&self) -> Option<(isize, usize)> {
+        if !self.osc133_markers_seen
+            || self.osc133_command_running_since.is_some()
+            || self.alternate_screen_state.is_some()
+            || self.is_scrolled
+            || !self.lines_below.is_empty()
+        {
+            return None;
+        }
+        let first_line = -(self.lines_above.len() as isize);
+        let mut markers = (first_line..self.viewport.len() as isize)
+            .rev()
+            .filter_map(|line| self.row_at(line).map(|row| (line, row)))
+            .flat_map(|(line, row)| row.osc133_markers.iter().rev().map(move |m| (line, m)));
+        let (input_line, input) = markers.next()?;
+        if input.kind != Osc133MarkerKind::Input
+            || input_line != self.cursor.y as isize
+            || input.column != self.cursor.x
+        {
+            return None;
+        }
+        let (prompt_line, prompt) = markers.next()?;
+        if prompt.kind != Osc133MarkerKind::Prompt {
+            return None;
+        }
+        for (line, row) in self.viewport.iter().enumerate().skip(self.cursor.y) {
+            let first_character = if line == self.cursor.y {
+                row.absolute_character_index(input.column)
+            } else {
+                0
+            };
+            if row
+                .columns
+                .iter()
+                .skip(first_character)
+                .any(|c| c.character != ' ')
+            {
+                return None;
+            }
+        }
+        Some((prompt_line, prompt.column))
     }
     pub fn render(
         &mut self,

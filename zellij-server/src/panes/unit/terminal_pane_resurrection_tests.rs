@@ -104,6 +104,28 @@ fn unheld_initial_contents_are_not_retained_for_later_replay() {
     assert!(!saved_contents.contains("INITIAL OUTPUT"));
 }
 
+#[test]
+fn serialize_osc133_restores_history_with_one_fresh_prompt_after_either_startup_choice() {
+    for key in [BareKey::Enter, BareKey::Esc] {
+        let mut source = new_pane();
+        source.handle_pty_bytes(
+            b"\x1b]133;A\x07old$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\noutput\x1b]133;D;0\x07\r\n\x1b]133;A\x07prompt$ \x1b]133;B\x07".to_vec(),
+        );
+        let saved_contents = source.serialize(Some(0)).unwrap();
+        assert!(source.grid.dump_screen(true).contains("prompt$"));
+
+        let mut pane = new_pane();
+        pane.restore_initial_contents(&saved_contents, true);
+        pane.hold(None, true, RunCommand::default());
+        assert!(press_key(&mut pane, key).is_some());
+        pane.handle_pty_bytes(b"prompt$ ".to_vec());
+        let contents = pane.grid.dump_screen(true);
+        assert!(contents.contains("old$ echo hi"));
+        assert!(contents.contains("output"));
+        assert_eq!(contents.matches("prompt$").count(), 1);
+    }
+}
+
 fn press_key(pane: &mut TerminalPane, key: BareKey) -> Option<AdjustedInput> {
     pane.adjust_input_to_terminal(&Some(KeyWithModifier::new(key)), vec![], false, Some(1))
 }

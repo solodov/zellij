@@ -4180,6 +4180,116 @@ fn viewport_position_of(grid: &Grid, needle: &str) -> Position {
 }
 
 #[test]
+fn serialize_osc133_omits_only_the_final_idle_prompt() {
+    for (prompt_marker, input_marker) in [("A", "B"), ("P", "I")] {
+        let content = format!(
+            "\x1b]133;A\x07old$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\n\x1b[31moutput\x1b[0m\x1b]133;D;0\x07\r\n\x1b]133;{prompt_marker}\x07project 日本\r\nbranch main\r\n$ \x1b]133;{input_marker}\x07\x1b[K"
+        );
+        let grid = create_grid_with_content(&content);
+        let live_contents = grid.dump_screen(true);
+        let expected = create_grid_with_content("old$ echo hi\r\n\x1b[31moutput\x1b[0m")
+            .serialize(Some(0));
+        for limit in [None, Some(0), Some(5)] {
+            assert_eq!(grid.serialize(limit), expected);
+        }
+        assert_eq!(grid.dump_screen(true), live_contents);
+        assert!(grid.trailing_idle_prompt_start().is_some());
+    }
+}
+
+#[test]
+fn serialize_osc133_keeps_wide_output_before_a_prompt_on_the_same_row() {
+    let grid = create_grid_with_content("a你b\x1b]133;A\x07提示$ \x1b]133;B\x07");
+    assert_eq!(
+        grid.serialize(Some(0)),
+        create_grid_with_content("a你b").serialize(Some(0))
+    );
+}
+
+#[test]
+fn serialize_osc133_trims_wrapped_prompts_starting_before_the_saved_scrollback() {
+    let grid = create_grid_with_dimensions(
+        3,
+        12,
+        "OUT\r\n\x1b]133;A\x07prompt-line-01\r\nprompt-line-02\r\nprompt-line-03\r\nprompt-line-04\r\n$ \x1b]133;B\x07",
+    );
+    assert!(grid.trailing_idle_prompt_start().unwrap().0 < -1);
+    assert_eq!(
+        grid.serialize(Some(0)),
+        create_grid_with_content("OUT").serialize(Some(0))
+    );
+    for limit in [None, Some(1)] {
+        assert_eq!(grid.serialize(limit), Some(String::new()));
+    }
+}
+
+#[test]
+fn serialize_osc133_respects_scrollback_limits_when_omitting_a_prompt() {
+    let mut content = String::new();
+    for line in 0..10 {
+        write!(&mut content, "line{line}\r\n").unwrap();
+    }
+    content.push_str("\x1b]133;A\x07$ \x1b]133;B\x07");
+    let grid = create_grid_with_dimensions(3, 40, &content);
+    for (limit, first_line) in [(None, 8), (Some(2), 6), (Some(0), 0), (Some(100), 0)] {
+        let expected_content = (first_line..10)
+            .map(|line| format!("line{line}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert_eq!(
+            grid.serialize(limit),
+            create_grid_with_content(&expected_content).serialize(Some(0))
+        );
+    }
+}
+
+#[test]
+fn serialize_osc133_preserves_input_and_uncertain_boundaries() {
+    for suffix in [
+        "$ ",
+        "\x1b]133;A\x07$ ",
+        "$ \x1b]133;B\x07",
+        "\x1b]133;A\x07$ \x1b]133;B\x07draft command",
+        "\x1b]133;A\x07$ \x1b]133;B\x07   ",
+        "\x1b]133;A\x07$ \x1b]133;B\x07draft command\x1b[3G",
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[1D",
+        "\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\r\npartial output",
+        "\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\r\nfinished\x1b]133;D;0\x07",
+        "\x1b]133;A\x07$ \x1b]133;B\x07\r\nbackground output\x1b[2;3H",
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[70Gright prompt\x1b[3G",
+        "\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07",
+    ] {
+        let grid = create_grid_with_content(&format!("output\r\n{suffix}"));
+        assert!(grid.trailing_idle_prompt_start().is_none(), "{suffix:?}");
+        assert_serialization_preserves_all_rows(&grid);
+    }
+}
+
+#[test]
+fn serialize_osc133_keeps_the_existing_snapshot_while_scrolled() {
+    let mut grid = create_grid_with_dimensions(
+        3,
+        40,
+        "one\r\ntwo\r\nthree\r\nfour\r\n\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    grid.move_viewport_up(1);
+    assert!(!grid.lines_below.is_empty());
+    assert!(grid.trailing_idle_prompt_start().is_none());
+    assert_serialization_preserves_all_rows(&grid);
+}
+
+fn assert_serialization_preserves_all_rows(grid: &Grid) {
+    let rows: Vec<_> = grid
+        .lines_above
+        .iter()
+        .chain(grid.viewport.iter())
+        .cloned()
+        .collect();
+    let expected = grid.output_buffer.serialize(&rows, true, None).unwrap();
+    assert_eq!(grid.serialize(Some(0)), Some(expected));
+}
+
+#[test]
 fn osc133_a_b_c_d_selects_command_and_output_without_prompt() {
     let mut grid = create_grid_with_content(
         "\x1b]133;A\x07$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nhi\x1b]133;D;0\x07 suffix",
