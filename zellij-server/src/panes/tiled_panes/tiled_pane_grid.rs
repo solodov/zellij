@@ -54,6 +54,11 @@ impl<'a> TiledPaneGrid<'a> {
         let mut pane_resizer = PaneResizer::new(self.panes.clone());
         pane_resizer.layout(direction, space)
     }
+    /// Keep panes with matching horizontal bounds aligned during an Acme resize.
+    pub fn layout_acme_columns(&mut self, space: usize) -> Result<()> {
+        let mut pane_resizer = PaneResizer::new(self.panes.clone());
+        pane_resizer.layout_columns(space)
+    }
     pub fn get_pane_geom(&self, pane_id: &PaneId) -> Option<PaneGeom> {
         let panes = self.panes.borrow();
         let pane_to_check = panes.get(pane_id)?;

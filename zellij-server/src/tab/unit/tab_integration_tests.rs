@@ -29,7 +29,7 @@ use zellij_utils::input::layout::{
 };
 use zellij_utils::input::mouse::MouseEvent;
 use zellij_utils::ipc::IpcReceiverWithContext;
-use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
+use zellij_utils::pane_size::{Dimension, PaneGeom, Size, SizeInPixels};
 use zellij_utils::position::Position;
 
 use crate::pty_writer::PtyWriteInstruction;
@@ -16585,6 +16585,173 @@ fn changing_frame_style_keeps_acme_layout_aligned_with_the_viewport() {
         native_acme_viewport_for_display_area(size, PaneFrameStyle::Full)
     );
     assert_acme_columns_fill_viewport(&tab, size);
+}
+
+#[test]
+fn terminal_resize_preserves_collapsed_acme_columns() {
+    let initial_size = Size {
+        cols: 420,
+        rows: 101,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(initial_size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+    for (id, placement) in [
+        (2, NewPanePlacement::AcmePane),
+        (3, NewPanePlacement::AcmePane),
+        (4, NewPanePlacement::AcmeColumn),
+        (5, NewPanePlacement::AcmePane),
+        (6, NewPanePlacement::AcmePane),
+    ] {
+        tab.new_pane(
+            PaneId::Terminal(id),
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    for id in [2, 5] {
+        tab.focus_pane_with_id(PaneId::Terminal(id), false, false, client_id)
+            .unwrap();
+        tab.acme_maximize_pane(client_id);
+    }
+    // Session layouts serialize column percentages as integers, so restored
+    // constraints can sum to 99% even when their current rectangles tile correctly.
+    for (pane_id, pane) in &mut tab.tiled_panes.panes {
+        let mut geom = pane.position_and_size();
+        let left_column = matches!(pane_id, PaneId::Terminal(1..=3));
+        geom.x = if left_column { 0 } else { 140 };
+        geom.cols = Dimension::percent(if left_column { 33.0 } else { 66.0 });
+        geom.cols.set_inner(if left_column { 140 } else { 280 });
+        pane.set_geom(geom);
+    }
+    let before = pane_geometries(&tab);
+    assert_acme_columns_fill_viewport(&tab, initial_size);
+
+    for size in [
+        Size {
+            cols: 375,
+            rows: 90,
+        },
+        Size {
+            cols: 191,
+            rows: 48,
+        },
+        Size {
+            cols: 150,
+            rows: 37,
+        },
+        Size { cols: 80, rows: 24 },
+        Size {
+            cols: 421,
+            rows: 102,
+        },
+        initial_size,
+    ] {
+        tab.resize_whole_tab(size).unwrap();
+        let geoms = pane_geometries(&tab);
+        assert!(
+            tab.native_acme_panes_fill_viewport(),
+            "invalid Acme layout after resize to {size:?}: {geoms:?}"
+        );
+        assert_acme_columns_fill_viewport(&tab, size);
+
+        tab.set_force_render();
+        let mut output = Output::default();
+        tab.render(&mut output, None).unwrap();
+        let serialized = output.serialize().unwrap();
+        let snapshot = take_snapshot(
+            &serialized[&client_id],
+            size.rows,
+            size.cols,
+            Palette::default(),
+        );
+        for ids in [[1, 2, 3], [4, 5, 6]] {
+            let column_geom = geoms[&PaneId::Terminal(ids[0])];
+            for id in ids {
+                let pane_id = PaneId::Terminal(id);
+                let geom = geoms[&pane_id];
+                assert_eq!((geom.x, geom.cols), (column_geom.x, column_geom.cols));
+                assert_eq!(geom.rows.is_fixed(), before[&pane_id].rows.is_fixed());
+                if before[&pane_id].rows.is_fixed() {
+                    assert_eq!(geom.rows.as_usize(), 1);
+                }
+                let button = Position::new(geom.y as i32, (geom.x + 1) as u16);
+                assert_eq!(
+                    tab.tiled_panes
+                        .acme_title_button_pane_id_at_position(&button),
+                    Some(pane_id)
+                );
+                assert!(
+                    snapshot
+                        .lines()
+                        .nth(geom.y)
+                        .unwrap()
+                        .contains(&format!("Pane #{id}")),
+                    "pane {id} title is missing after resize to {size:?}:\n{snapshot}"
+                );
+            }
+        }
+    }
+
+    for id in [1, 3, 4, 6] {
+        let pane_id = PaneId::Terminal(id);
+        let collapsed = pane_geometries(&tab)[&pane_id];
+        assert_eq!(collapsed.rows.as_usize(), 1);
+        left_click(
+            &mut tab,
+            Position::new(collapsed.y as i32, (collapsed.x + 1) as u16),
+            client_id,
+        );
+        assert!(pane_geometries(&tab)[&pane_id].rows.as_usize() > 1);
+        assert_acme_columns_fill_viewport(&tab, initial_size);
+    }
+}
+
+#[test]
+fn terminal_resize_preserves_shared_fixed_acme_column_width() {
+    let initial_size = Size { cols: 60, rows: 24 };
+    let client_id = 1;
+    let mut tab = create_new_tab(initial_size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::Titles);
+    for id in 2..=8 {
+        let placement = if id % 2 == 0 {
+            NewPanePlacement::AcmePane
+        } else {
+            NewPanePlacement::AcmeColumn
+        };
+        tab.new_pane(
+            PaneId::Terminal(id),
+            None,
+            None,
+            false,
+            true,
+            placement,
+            Some(client_id),
+            None,
+        )
+        .unwrap();
+    }
+    // A lower pane can fix the width shared with a flexible pane above it.
+    let pane = tab.tiled_panes.panes.get_mut(&PaneId::Terminal(2)).unwrap();
+    let mut geom = pane.position_and_size();
+    geom.cols = Dimension::fixed(15);
+    pane.set_geom(geom);
+    assert_acme_columns_fill_viewport(&tab, initial_size);
+
+    for cols in 18..=61 {
+        let size = Size { cols, rows: 24 };
+        tab.resize_whole_tab(size).unwrap();
+        let geoms = pane_geometries(&tab);
+        assert_eq!(geoms[&PaneId::Terminal(1)].cols.as_usize(), 15);
+        assert_eq!(geoms[&PaneId::Terminal(2)].cols.as_usize(), 15);
+        assert_acme_columns_fill_viewport(&tab, size);
+    }
 }
 
 #[test]

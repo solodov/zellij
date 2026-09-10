@@ -57,6 +57,19 @@ impl<'a> PaneResizer<'a> {
         Ok(())
     }
 
+    /// Resize aligned columns with one width variable shared by all their panes.
+    pub fn layout_columns(&mut self, space: usize) -> Result<()> {
+        let mut column_variables = HashMap::new();
+        for (pane_id, pane) in self.panes.borrow().iter() {
+            let geom = pane.current_geom();
+            let variable = column_variables
+                .entry((geom.x, geom.cols.as_usize()))
+                .or_insert_with(Variable::new);
+            self.vars.insert(*pane_id, *variable);
+        }
+        self.layout(SplitDirection::Horizontal, space)
+    }
+
     fn solve(&mut self, direction: SplitDirection, space: usize) -> Result<Grid, String> {
         let grid: Grid = self
             .grid_boundaries(direction)
@@ -76,6 +89,7 @@ impl<'a> PaneResizer<'a> {
         Ok(grid)
     }
 
+    /// Round each size variable once, including widths shared by multiple panes.
     fn discretize_spans(&mut self, mut grid: Grid, space: usize) -> Result<Vec<Span>, String> {
         let mut rounded_sizes: HashMap<_, _> = grid
             .iter()
@@ -88,6 +102,13 @@ impl<'a> PaneResizer<'a> {
             })
             .collect();
 
+        // A shared width is fixed if any pane using it has a fixed-width constraint.
+        let fixed_variables: HashSet<_> = grid
+            .iter()
+            .flatten()
+            .filter(|span| span.size.is_fixed())
+            .map(|span| span.size_var)
+            .collect();
         // Round f64 pane sizes to usize without gaps or overlap
         let mut finalised = Vec::new();
         for spans in &mut grid {
@@ -95,7 +116,9 @@ impl<'a> PaneResizer<'a> {
             let mut error = space as isize - rounded_size;
             let mut flex_spans: Vec<_> = spans
                 .iter_mut()
-                .filter(|s| !s.size.is_fixed() && !finalised.contains(&s.pid))
+                .filter(|s| {
+                    !fixed_variables.contains(&s.size_var) && !finalised.contains(&s.size_var)
+                })
                 .collect();
             flex_spans.sort_by_key(|s| rounded_sizes[&s.size_var]);
             if error < 0 {
@@ -107,7 +130,7 @@ impl<'a> PaneResizer<'a> {
                     .and_modify(|s| *s += error.signum());
                 error -= error.signum();
             }
-            finalised.extend(spans.iter().map(|s| s.pid));
+            finalised.extend(spans.iter().map(|s| s.size_var));
         }
 
         // Update span positions based on their rounded sizes

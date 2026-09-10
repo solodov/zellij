@@ -2128,6 +2128,7 @@ impl TiledPanes {
         self.resize(display_area);
     }
 
+    /// Resize tiled panes without letting native Acme column widths diverge across rows.
     pub fn resize(&mut self, new_screen_size: Size) {
         {
             if self.display_area_changed(new_screen_size) {
@@ -2145,12 +2146,20 @@ impl TiledPanes {
                 *viewport,
             );
 
+            let preserve_acme_columns = native_acme_tab_bar_enabled(self.pane_frame_style);
             let resize_horizontally = |pane_grid: &mut TiledPaneGrid,
                                        display_area: &mut Size,
                                        viewport: &mut Viewport,
                                        cols: usize|
              -> bool {
-                match pane_grid.layout(SplitDirection::Horizontal, cols) {
+                // Independent pane widths can diverge across rows when rounded layout
+                // percentages leave spare space (eg. restored 33% + 66% columns).
+                let result = if preserve_acme_columns {
+                    pane_grid.layout_acme_columns(cols)
+                } else {
+                    pane_grid.layout(SplitDirection::Horizontal, cols)
+                };
+                match result {
                     Ok(_) => {
                         let column_difference = cols as isize - display_area.cols as isize;
                         viewport.cols = (viewport.cols as isize + column_difference) as usize;
