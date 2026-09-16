@@ -460,6 +460,7 @@ impl SessionMetaData {
                     default_shell: new_config.options.default_shell,
                     pane_frame_style,
                     copy_command: new_config.options.copy_command,
+                    copy_on_select_command: new_config.options.copy_on_select_command,
                     copy_to_clipboard: new_config.options.copy_clipboard,
                     copy_on_select: new_config.options.copy_on_select.unwrap_or(true),
                     auto_layout: new_config.options.auto_layout.unwrap_or(true),

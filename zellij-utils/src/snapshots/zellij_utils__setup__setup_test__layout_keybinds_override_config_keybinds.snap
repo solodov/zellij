@@ -108,6 +108,7 @@ Config {
         on_force_close: None,
         scroll_buffer_size: None,
         copy_command: None,
+        copy_on_select_command: None,
         copy_clipboard: None,
         copy_on_select: None,
         osc8_hyperlinks: None,

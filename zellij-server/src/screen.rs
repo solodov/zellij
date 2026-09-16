@@ -1018,6 +1018,7 @@ pub enum ScreenInstruction {
         default_shell: Option<PathBuf>,
         pane_frame_style: PaneFrameStyle,
         copy_command: Option<String>,
+        copy_on_select_command: Option<String>,
         copy_to_clipboard: Option<Clipboard>,
         copy_on_select: bool,
         auto_layout: bool,
@@ -1588,18 +1589,22 @@ impl From<&ScreenInstruction> for ScreenContext {
 #[derive(Debug, Clone)]
 pub(crate) struct CopyOptions {
     pub command: Option<String>,
+    pub copy_on_select_command: Option<String>,
     pub clipboard: Clipboard,
     pub copy_on_select: bool,
 }
 
 impl CopyOptions {
+    /// Keep explicit and automatic copy commands separate; tabs resolve the optional fallback.
     pub(crate) fn new(
         copy_command: Option<String>,
+        copy_on_select_command: Option<String>,
         copy_clipboard: Clipboard,
         copy_on_select: bool,
     ) -> Self {
         Self {
             command: copy_command,
+            copy_on_select_command,
             clipboard: copy_clipboard,
             copy_on_select,
         }
@@ -1609,6 +1614,7 @@ impl CopyOptions {
     pub(crate) fn default() -> Self {
         Self {
             command: None,
+            copy_on_select_command: None,
             clipboard: Clipboard::default(),
             copy_on_select: true,
         }
@@ -7735,6 +7741,7 @@ impl Screen {
         default_shell: Option<PathBuf>,
         pane_frame_style: PaneFrameStyle,
         copy_command: Option<String>,
+        copy_on_select_command: Option<String>,
         copy_to_clipboard: Option<Clipboard>,
         copy_on_select: bool,
         auto_layout: bool,
@@ -7775,6 +7782,7 @@ impl Screen {
         self.default_editor = default_editor.clone().or_else(|| get_default_editor());
         self.auto_layout = auto_layout;
         self.copy_options.command = copy_command.clone();
+        self.copy_options.copy_on_select_command = copy_on_select_command;
         self.copy_options.copy_on_select = copy_on_select;
         self.pane_frame_style = pane_frame_style;
         self.advanced_mouse_actions = advanced_mouse_actions;
@@ -9005,6 +9013,7 @@ pub(crate) fn screen_thread_main(
         .map(|l| format!("{}", l.display()));
     let copy_options = CopyOptions::new(
         config_options.copy_command,
+        config_options.copy_on_select_command,
         config_options.copy_clipboard.unwrap_or_default(),
         config_options.copy_on_select.unwrap_or(true),
     );
@@ -12537,6 +12546,7 @@ pub(crate) fn screen_thread_main(
                 pane_frame_style,
                 copy_to_clipboard,
                 copy_command,
+                copy_on_select_command,
                 copy_on_select,
                 auto_layout,
                 rounded_corners,
@@ -12569,6 +12579,7 @@ pub(crate) fn screen_thread_main(
                         default_shell,
                         pane_frame_style,
                         copy_command,
+                        copy_on_select_command,
                         copy_to_clipboard,
                         copy_on_select,
                         auto_layout,

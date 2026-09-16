@@ -271,6 +271,7 @@ pub(crate) struct Tab {
     acme_context_menus: HashMap<ClientId, AcmeContextMenuState>,
     link_handler: Rc<RefCell<LinkHandler>>,
     clipboard_provider: ClipboardProvider,
+    copy_on_select_provider: Option<ClipboardProvider>,
     // TODO: used only to focus the pane when the layout is loaded
     // it seems that optimization is possible using `active_panes`
     focus_pane_id: Option<PaneId>,
@@ -1028,6 +1029,9 @@ impl Tab {
             Some(command) => ClipboardProvider::Command(CopyCommand::new(command)),
             None => ClipboardProvider::Osc52(copy_options.clipboard),
         };
+        let copy_on_select_provider = copy_options
+            .copy_on_select_command
+            .map(|command| ClipboardProvider::Command(CopyCommand::new(command)));
         let swap_layouts = SwapLayouts::new(swap_layouts, display_area.clone());
 
         Tab {
@@ -1069,6 +1073,7 @@ impl Tab {
             acme_context_menus: HashMap::new(),
             link_handler: Rc::new(RefCell::new(LinkHandler::new())),
             clipboard_provider,
+            copy_on_select_provider,
             focus_pane_id: None,
             copy_on_select: copy_options.copy_on_select,
             terminal_emulator_colors,
@@ -7321,7 +7326,22 @@ impl Tab {
         Ok(())
     }
 
+    /// Copy automatically selected text, falling back to the ordinary clipboard provider.
+    fn write_selection_to_clipboard_on_select(&self, selection: &str) -> Result<()> {
+        let provider = self
+            .copy_on_select_provider
+            .as_ref()
+            .unwrap_or(&self.clipboard_provider);
+        self.write_to_clipboard(selection, provider)
+    }
+
+    /// Copy explicitly requested text using the ordinary clipboard provider.
     fn write_selection_to_clipboard(&self, selection: &str) -> Result<()> {
+        self.write_to_clipboard(selection, &self.clipboard_provider)
+    }
+
+    /// Write text and report the destination or failure to clients and plugins.
+    fn write_to_clipboard(&self, selection: &str, provider: &ClipboardProvider) -> Result<()> {
         let err_context = || format!("failed to write selection to clipboard: '{}'", selection);
 
         let mut output = Output::default();
@@ -7329,28 +7349,20 @@ impl Tab {
             { self.connected_clients.borrow().iter().copied().collect() };
         output.add_clients(&connected_clients, self.link_handler.clone(), None);
         let client_ids = connected_clients.iter().copied();
-        let clipboard_event =
-            match self
-                .clipboard_provider
-                .set_content(selection, &mut output, client_ids)
-            {
-                Ok(_) => output
-                    .serialize()
-                    .and_then(|serialized_output| {
-                        self.senders
-                            .send_to_server(ServerInstruction::Render(Some(serialized_output)))
-                    })
-                    .and_then(|_| {
-                        Ok(Event::CopyToClipboard(
-                            self.clipboard_provider.as_copy_destination(),
-                        ))
-                    })
-                    .with_context(err_context)?,
-                Err(err) => {
-                    Err::<(), _>(err).with_context(err_context).non_fatal();
-                    Event::SystemClipboardFailure
-                },
-            };
+        let clipboard_event = match provider.set_content(selection, &mut output, client_ids) {
+            Ok(_) => output
+                .serialize()
+                .and_then(|serialized_output| {
+                    self.senders
+                        .send_to_server(ServerInstruction::Render(Some(serialized_output)))
+                })
+                .and_then(|_| Ok(Event::CopyToClipboard(provider.as_copy_destination())))
+                .with_context(err_context)?,
+            Err(err) => {
+                Err::<(), _>(err).with_context(err_context).non_fatal();
+                Event::SystemClipboardFailure
+            },
+        };
         self.senders
             .send_to_plugin(PluginInstruction::Update(vec![(
                 None,
@@ -8399,11 +8411,16 @@ impl Tab {
             self.default_editor = Some(default_editor);
         }
     }
+    /// Apply clipboard configuration to existing tabs, including removing a mouse-copy override.
     pub fn update_copy_options(&mut self, copy_options: &CopyOptions) {
         self.clipboard_provider = match &copy_options.command {
             Some(command) => ClipboardProvider::Command(CopyCommand::new(command.clone())),
             None => ClipboardProvider::Osc52(copy_options.clipboard),
         };
+        self.copy_on_select_provider = copy_options
+            .copy_on_select_command
+            .clone()
+            .map(|command| ClipboardProvider::Command(CopyCommand::new(command)));
         self.copy_on_select = copy_options.copy_on_select;
     }
     pub fn update_auto_layout(&mut self, auto_layout: bool) {
@@ -8953,6 +8970,10 @@ pub fn pane_info_for_pane(
     }
     pane_info
 }
+
+#[cfg(all(test, unix))]
+#[path = "./unit/clipboard_tests.rs"]
+mod clipboard_tests;
 
 #[cfg(test)]
 #[path = "./unit/tab_tests.rs"]

@@ -1237,6 +1237,8 @@ message Options {
   optional string host_notification_protocol = 67;
   optional bool scroll_mode_sync = 68;
   optional ThemeHue explicit_theme_hue = 69;
+  // Fork-only options use high tags to avoid upstream field collisions.
+  optional string copy_on_select_command = 900;
 }
 
 enum OnForceClose {

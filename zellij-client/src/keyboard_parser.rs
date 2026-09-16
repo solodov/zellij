@@ -199,6 +199,15 @@ fn parse_for_test(bytes: &[u8]) -> Option<KeyWithModifier> {
 }
 
 #[test]
+fn alacritty_cmd_c_mapping_parses_as_super_c() {
+    use zellij_utils::data::BareKey;
+    assert_eq!(
+        parse_for_test(b"\x1b[99;9u"),
+        Some(KeyWithModifier::new(BareKey::Char('c')).with_super_modifier())
+    );
+}
+
+#[test]
 pub fn can_parse_bare_keys() {
     use zellij_utils::data::BareKey;
     let key = "\u{1b}[97u";

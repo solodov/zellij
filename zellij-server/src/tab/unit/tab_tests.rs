@@ -159,6 +159,14 @@ fn create_new_tab_with_plugin_receiver(
     size: Size,
     stacked_resize: bool,
 ) -> (Tab, Receiver<(PluginInstruction, ErrorContext)>) {
+    create_new_tab_with_copy_options(size, stacked_resize, CopyOptions::default())
+}
+
+pub(super) fn create_new_tab_with_copy_options(
+    size: Size,
+    stacked_resize: bool,
+    copy_options: CopyOptions,
+) -> (Tab, Receiver<(PluginInstruction, ErrorContext)>) {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -179,7 +187,6 @@ fn create_new_tab_with_plugin_receiver(
     connected_clients.insert(client_id, false);
     let connected_clients = Rc::new(RefCell::new(connected_clients));
     let terminal_emulator_colors = Rc::new(RefCell::new(Palette::default()));
-    let copy_options = CopyOptions::default();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
     let current_pane_group = Rc::new(RefCell::new(PaneGroups::new(ThreadSenders::default())));

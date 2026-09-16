@@ -927,6 +927,7 @@ impl From<crate::input::options::Options>
             }),
             scroll_buffer_size: options.scroll_buffer_size.map(|s| s as u32),
             copy_command: options.copy_command,
+            copy_on_select_command: options.copy_on_select_command,
             copy_clipboard: options.copy_clipboard.map(|c| match c {
                 crate::input::options::Clipboard::System => ProtoClipboard::System as i32,
                 crate::input::options::Clipboard::Primary => ProtoClipboard::Primary as i32,
@@ -1057,6 +1058,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
                 .transpose()?,
             scroll_buffer_size: options.scroll_buffer_size.map(|s| s as usize),
             copy_command: options.copy_command,
+            copy_on_select_command: options.copy_on_select_command,
             copy_clipboard: options
                 .copy_clipboard
                 .map(|c| match ProtoClipboard::try_from(c).ok() {

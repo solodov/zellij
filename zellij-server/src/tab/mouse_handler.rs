@@ -2198,7 +2198,7 @@ impl MouseHandler {
                         let selected_text = pane_with_selection.get_selected_text(client_id);
                         if let Some(selected_text) = selected_text {
                             leave_clipboard_message = true;
-                            tab.write_selection_to_clipboard(&selected_text)
+                            tab.write_selection_to_clipboard_on_select(&selected_text)
                                 .with_context(err_context)?;
                         }
                     }
