@@ -2657,7 +2657,7 @@ pub fn middle_clicking_last_acme_title_button_kills_session() {
 }
 
 #[test]
-fn group_panes_with_mouse() {
+fn mouse_clicks_and_drags_do_not_change_pane_groups() {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -2667,6 +2667,18 @@ fn group_panes_with_mouse() {
 
     new_tab(&mut screen, 1, 0);
     new_tab(&mut screen, 2, 1);
+    for event in [
+        MouseEvent::new_left_press_with_alt_event(Position::new(2, 80)),
+        MouseEvent::new_left_motion_with_alt_event(Position::new(2, 81)),
+    ] {
+        screen.handle_mouse_event(event, client_id);
+        assert!(
+            screen.current_pane_group.borrow().clone_inner().is_empty(),
+            "Mouse gestures must not create a pane group"
+        );
+    }
+
+    screen.toggle_pane_in_group(client_id).unwrap();
     screen.handle_mouse_event(
         MouseEvent::new_left_press_with_alt_event(Position::new(2, 80)),
         client_id,
@@ -2679,22 +2691,7 @@ fn group_panes_with_mouse() {
             .clone_inner()
             .get(&client_id),
         Some(&vec![PaneId::Terminal(2)]),
-        "Pane Id added to client's pane group"
-    );
-
-    screen.handle_mouse_event(
-        MouseEvent::new_left_press_with_alt_event(Position::new(2, 80)),
-        client_id,
-    );
-
-    assert_eq!(
-        screen
-            .current_pane_group
-            .borrow()
-            .clone_inner()
-            .get(&client_id),
-        Some(&vec![]),
-        "Pane Id removed from client's pane group"
+        "Mouse gestures must not toggle membership in an existing group"
     );
 }
 
@@ -2921,13 +2918,14 @@ fn group_panes_following_focus() {
 }
 
 #[test]
-fn break_group_with_mouse() {
+fn mouse_right_click_does_not_break_pane_group() {
     let size = Size {
         cols: 121,
         rows: 20,
     };
     let client_id = 1;
     let mut screen = create_new_screen(size, true, true);
+    screen.pane_frame_style = PaneFrameStyle::Titles;
 
     new_tab(&mut screen, 1, 0);
 
@@ -2980,18 +2978,30 @@ fn break_group_with_mouse() {
         );
     }
 
-    screen.handle_mouse_event(
-        MouseEvent::new_right_press_with_alt_event(Position::new(2, 80)),
-        client_id,
+    // Use the title outside its control square, not the content's context-menu handler.
+    let event = MouseEvent::new_right_press_with_alt_event(Position::new(1, 80));
+    assert!(
+        screen
+            .get_active_tab_mut(client_id)
+            .unwrap()
+            .handle_mouse_event(&event, client_id)
+            .unwrap()
+            .ungroup,
+        "The upstream ungroup action remains intact"
     );
+    screen.handle_mouse_event(event, client_id);
     assert_eq!(
         screen
             .current_pane_group
             .borrow()
             .clone_inner()
             .get(&client_id),
-        Some(&vec![]),
-        "Group cleared by mouse event"
+        Some(&vec![
+            PaneId::Terminal(4),
+            PaneId::Terminal(3),
+            PaneId::Terminal(2)
+        ]),
+        "Mouse gestures must not clear an existing pane group"
     );
 }
 

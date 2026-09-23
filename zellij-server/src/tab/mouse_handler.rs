@@ -675,15 +675,12 @@ fn acme_hover_help_lines(target: AcmeHoverHelpTarget) -> Vec<&'static str> {
                 vec!["left drag: move", "right: no-op"]
             }
         },
-        AcmeHoverHelpTarget::AcmeTitle => vec![
-            "ctrl-left: equalize rows",
-            "alt-left/right: swap column",
-            "right: no-op",
-        ],
+        AcmeHoverHelpTarget::AcmeTitle => vec!["ctrl-left: equalize rows", "right: no-op"],
         AcmeHoverHelpTarget::AcmeTitleButton => vec![
             "left drag: move",
             "ctrl-left: new pane",
             "ctrl-right: new column",
+            "alt-left/right: swap column",
             "middle: close",
         ],
         AcmeHoverHelpTarget::AcmeTabSquare => {
@@ -3342,6 +3339,45 @@ mod tests {
                 pane_id: PaneId::Terminal(1),
             }
         );
+    }
+
+    #[test]
+    fn column_swap_hint_is_only_on_the_control_square() {
+        let mut context = mouse_event_context(false);
+        context.acme_title_pane_id = Some(PaneId::Terminal(1));
+        let title_target = acme_hover_help_target(&context).unwrap();
+        assert_eq!(title_target, AcmeHoverHelpTarget::AcmeTitle);
+        assert!(!acme_hover_help_lines(title_target).contains(&"alt-left/right: swap column"));
+
+        context.acme_title_button_pane_id = Some(PaneId::Terminal(1));
+        let square_target = acme_hover_help_target(&context).unwrap();
+        assert_eq!(square_target, AcmeHoverHelpTarget::AcmeTitleButton);
+        assert!(acme_hover_help_lines(square_target).contains(&"alt-left/right: swap column"));
+    }
+
+    #[test]
+    fn alt_wheel_still_routes_to_prompt_navigation() {
+        let context = mouse_event_context(false);
+        let position = Position::new(1, 1);
+        for (event, expected) in [
+            (
+                MouseEvent::new_alt_scroll_up_event(position),
+                MouseAction::ScrollToPreviousPrompt {
+                    pane_id: PaneId::Terminal(1),
+                },
+            ),
+            (
+                MouseEvent::new_alt_scroll_down_event(position),
+                MouseAction::ScrollToNextPrompt {
+                    pane_id: PaneId::Terminal(1),
+                },
+            ),
+        ] {
+            assert_eq!(
+                MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

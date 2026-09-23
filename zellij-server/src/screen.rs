@@ -8162,6 +8162,7 @@ impl Screen {
             }
         }
     }
+    /// Handle mouse input without applying mouse-driven pane grouping in this fork.
     pub fn handle_mouse_event(&mut self, event: MouseEvent, client_id: ClientId) {
         let is_bare_motion = event.event_type == MouseEventType::Motion
             && !event.left
@@ -8192,20 +8193,23 @@ impl Screen {
                 if event.event_type == MouseEventType::Press && (event.left || event.middle || event.right) {
                     should_render |= self.acknowledge_focused_pane_attention(client_id);
                 }
+                // Fork policy: retain upstream grouping code, but disable its mouse effects.
+                // Do not disable advanced_mouse_actions: Alt-wheel prompt navigation needs it.
+                const MOUSE_PANE_GROUPING_ENABLED: bool = false;
                 if let Some(pane_id) = mouse_effect.group_toggle {
-                    if self.advanced_mouse_actions {
+                    if MOUSE_PANE_GROUPING_ENABLED && self.advanced_mouse_actions {
                         self.toggle_pane_id_in_group(pane_id, &client_id);
                         should_render = true;
                     }
                 }
                 if let Some(pane_id) = mouse_effect.group_add {
-                    if self.advanced_mouse_actions {
+                    if MOUSE_PANE_GROUPING_ENABLED && self.advanced_mouse_actions {
                         self.add_pane_id_to_group(pane_id, &client_id);
                         should_render = true;
                     }
                 }
                 if mouse_effect.ungroup {
-                    if self.advanced_mouse_actions {
+                    if MOUSE_PANE_GROUPING_ENABLED && self.advanced_mouse_actions {
                         self.clear_pane_group(&client_id);
                         should_render = true;
                     }
