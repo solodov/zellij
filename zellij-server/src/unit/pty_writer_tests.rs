@@ -111,6 +111,9 @@ impl ServerOsApi for MockServerOsApi {
             )),
         }
     }
+    fn reset_terminal(&self, _id: u32) -> Result<()> {
+        Ok(())
+    }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         Ok(())
     }

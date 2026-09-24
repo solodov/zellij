@@ -2951,6 +2951,42 @@ impl Grid {
     pub fn mark_for_rerender(&mut self) {
         self.should_render = true;
     }
+    /// Discard buffered output and parser state for an explicit user-requested recovery.
+    pub fn reset_for_recovery(&mut self) {
+        if let Some(alternate) = self.alternate_screen_state.as_mut() {
+            if let Some(images) = alternate.sixel_grid.clear() {
+                alternate.sixel_grid.reap_images(images);
+            }
+        }
+        self.reset_terminal_state();
+        self.lock_renders = false;
+        self.bracketed_paste_mode = false;
+        self.insert_mode = false;
+        self.color_palette_notification_enabled = false;
+        self.horizontal_tabstops = create_horizontal_tabstops(self.width);
+        self.preceding_char = None;
+        self.selection = Selection::default();
+        self.click.reset();
+        self.command_output_flash = None;
+        self.hover_position = None;
+        self.cached_hover_tooltip = None;
+        self.ring_bell = false;
+        self.pending_messages_to_pty.clear();
+        self.pending_forwarded_queries.clear();
+        self.pending_clipboard_update = None;
+        self.pending_osc7_cwd = None;
+        self.pending_desktop_notifications.clear();
+        self.pending_nested_session_messages.clear();
+        self.ui_component_bytes = None;
+        self.nested_frame_bytes = None;
+        self.xtgettcap_bytes = None;
+        // clear() removes images but does not abort an unfinished sixel parser.
+        self.sixel_grid = SixelGrid::new(
+            self.character_cell_size.clone(),
+            self.sixel_grid.sixel_image_store.clone(),
+        );
+        self.mark_for_rerender();
+    }
     pub fn reset_terminal_state(&mut self) {
         if let Some(alternate_screen_state) = self.alternate_screen_state.as_mut() {
             alternate_screen_state.kitty_grid.clear_all_placements();

@@ -293,6 +293,7 @@ pub(super) enum AcmeContextMenuAction {
     Send,
     Look,
     GoToDefinition,
+    Reset,
     Cancel,
 }
 
@@ -323,13 +324,14 @@ const ACME_HOVER_HELP_DELAY_MS: u128 = 1400;
 const ACME_CONTEXT_MENU_LABEL_WIDTH: usize = 10;
 const ACME_CONTEXT_MENU_CONTENT_WIDTH: usize = ACME_CONTEXT_MENU_LABEL_WIDTH + 2;
 const ACME_CONTEXT_MENU_WIDTH: usize = ACME_CONTEXT_MENU_CONTENT_WIDTH + 2;
-const ACME_CONTEXT_MENU_ITEM_COUNT: usize = 5;
+const ACME_CONTEXT_MENU_ITEM_COUNT: usize = 6;
 const ACME_CONTEXT_MENU_HEIGHT: usize = ACME_CONTEXT_MENU_ITEM_COUNT + 2;
 const ACME_CONTEXT_MENU_ITEMS: [(AcmeContextMenuAction, &str); ACME_CONTEXT_MENU_ITEM_COUNT] = [
     (AcmeContextMenuAction::Put, "put"),
     (AcmeContextMenuAction::Send, "send"),
     (AcmeContextMenuAction::Look, "look"),
     (AcmeContextMenuAction::GoToDefinition, "definition"),
+    (AcmeContextMenuAction::Reset, "reset"),
     (AcmeContextMenuAction::Cancel, "cancel"),
 ];
 
@@ -1369,6 +1371,11 @@ impl MouseHandler {
                         })
                         .context("failed to plumb context-menu definition lookup")?;
                 }
+            },
+            AcmeContextMenuAction::Reset => {
+                tab.reset_terminal_pane(menu.pane_id)
+                    .context("failed to reset context-menu pane")
+                    .non_fatal();
             },
             AcmeContextMenuAction::Cancel => {},
         }
@@ -3611,6 +3618,11 @@ mod tests {
 
         menu.update_for_mouse_position(Position::new(6, 3), Size { cols: 80, rows: 24 });
         assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Reset));
+        assert_eq!(menu.drag_offset, None);
+
+        menu.update_for_mouse_position(Position::new(7, 3), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
         assert_eq!(menu.selected_action, Some(AcmeContextMenuAction::Cancel));
         assert_eq!(menu.drag_offset, None);
     }
@@ -3635,6 +3647,26 @@ mod tests {
         assert_eq!((menu.x, menu.y), original_position);
         assert_eq!(menu.selected_action, None);
         assert_eq!(menu.action_for_release(Position::new(10, 20)), None);
+    }
+
+    #[test]
+    fn context_menu_reset_requires_release_on_its_row() {
+        let mut menu = AcmeContextMenuState::new(
+            PaneId::Terminal(1),
+            Position::new(1, 1),
+            Size { cols: 80, rows: 24 },
+        );
+        let original_position = (menu.x, menu.y);
+        menu.update_for_mouse_position(Position::new(6, 3), Size { cols: 80, rows: 24 });
+        assert_eq!(menu.drag_offset, None);
+        assert_eq!(
+            menu.action_for_release(Position::new(6, 3)),
+            Some(AcmeContextMenuAction::Reset)
+        );
+        assert_eq!(menu.action_for_release(Position::new(10, 20)), None);
+        menu.update_for_mouse_position(Position::new(10, 20), Size { cols: 80, rows: 24 });
+        assert_eq!((menu.x, menu.y), original_position);
+        assert_eq!(menu.selected_action, None);
     }
 
     #[test]

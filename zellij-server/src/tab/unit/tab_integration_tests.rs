@@ -51,6 +51,8 @@ use zellij_utils::{
 struct FakeInputOutput {
     file_dumps: Arc<Mutex<HashMap<String, String>>>,
     pub tty_stdin_bytes: Arc<Mutex<BTreeMap<u32, Vec<u8>>>>,
+    terminal_resets: Arc<Mutex<Vec<u32>>>,
+    fail_terminal_reset: bool,
 }
 
 impl ServerOsApi for FakeInputOutput {
@@ -81,6 +83,14 @@ impl ServerOsApi for FakeInputOutput {
             .or_insert_with(|| vec![])
             .extend_from_slice(buf);
         Ok(buf.len())
+    }
+    fn reset_terminal(&self, id: u32) -> Result<()> {
+        self.terminal_resets.lock().unwrap().push(id);
+        if self.fail_terminal_reset {
+            Err(anyhow!("PTY has exited"))
+        } else {
+            Ok(())
+        }
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
@@ -1502,6 +1512,58 @@ fn clear_screen() {
         "",
         "screen was cleared properly"
     );
+}
+
+#[test]
+fn context_menu_reset_recovers_only_the_clicked_pane_even_if_pty_reset_fails() {
+    for fail_terminal_reset in [false, true] {
+        let mut tab = create_new_tab(Size { cols: 121, rows: 20 }, ModeInfo::default());
+        let os_api = FakeInputOutput { fail_terminal_reset, ..Default::default() };
+        let resets = os_api.terminal_resets.clone();
+        let stdin = os_api.tty_stdin_bytes.clone();
+        tab.os_api = Box::new(os_api);
+        tab.new_pane(
+            PaneId::Terminal(2), None, None, false, true,
+            NewPanePlacement::default(), Some(1), None,
+        ).unwrap();
+        tab.handle_pty_bytes(2, b"untouched".to_vec()).unwrap();
+        tab.handle_pty_bytes(1, b"history\x1b[?1049h\x1b[?1002;1006h\x1b[?25l\x1b[?2026hbroken".to_vec()).unwrap();
+        // Pane 2 is focused, but the menu belongs to pane 1.
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+        tab.handle_mouse_event(&MouseEvent::new_right_press_event(Position::new(1, 1)), 1).unwrap();
+        assert!(tab.acme_context_menus.contains_key(&1));
+        tab.handle_mouse_event(&MouseEvent::new_right_release_event(Position::new(6, 3)), 1).unwrap();
+        assert!(tab.acme_context_menus.is_empty());
+        assert_eq!(*resets.lock().unwrap(), vec![1]);
+        assert!(stdin.lock().unwrap().is_empty());
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+        let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+        assert!(!pane.is_alternate_mode_active());
+        assert!(!pane.is_mid_frame());
+        assert_eq!(pane.dump_screen(true, None), "");
+        assert!(pane.cursor_coordinates(None).unwrap().2);
+        assert!(tab.get_pane_with_id(PaneId::Terminal(2)).unwrap().dump_screen(true, None).contains("untouched"));
+        tab.handle_pty_bytes(1, b"recovered".to_vec()).unwrap();
+        assert!(tab.get_pane_with_id(PaneId::Terminal(1)).unwrap().dump_screen(true, None).contains("recovered"));
+    }
+}
+
+#[test]
+fn reset_terminal_pane_discards_scrolled_output_and_ignores_held_or_missing_panes() {
+    let mut tab = create_new_tab(Size { cols: 121, rows: 20 }, ModeInfo::default());
+    let os_api = FakeInputOutput::default();
+    let resets = os_api.terminal_resets.clone();
+    tab.os_api = Box::new(os_api);
+    tab.pending_vte_events.insert(1, vec![b"\x1b[?1049hbuffered".to_vec()]);
+    tab.reset_terminal_pane(PaneId::Terminal(1)).unwrap();
+    assert!(!tab.pending_vte_events.contains_key(&1));
+    tab.get_pane_with_id_mut(PaneId::Terminal(1)).unwrap().hold(Some(0), false, RunCommand::default());
+    let before = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap().dump_screen(true, None);
+    tab.reset_terminal_pane(PaneId::Terminal(1)).unwrap();
+    tab.reset_terminal_pane(PaneId::Terminal(999)).unwrap();
+    tab.reset_terminal_pane(PaneId::Plugin(1)).unwrap();
+    assert_eq!(*resets.lock().unwrap(), vec![1]);
+    assert_eq!(tab.get_pane_with_id(PaneId::Terminal(1)).unwrap().dump_screen(true, None), before);
 }
 
 #[test]

@@ -405,6 +405,8 @@ pub trait Pane {
     fn pull_left(&mut self, count: usize);
     fn pull_up(&mut self, count: usize);
     fn clear_screen(&mut self);
+    /// Recover terminal state and clear its buffers; non-terminal panes are unaffected.
+    fn reset_terminal(&mut self) {}
     fn dump_screen(&self, _full: bool, _client_id: Option<ClientId>) -> String {
         "".to_owned()
     }
@@ -6699,6 +6701,24 @@ impl Tab {
         if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
             pane.clear_screen();
         }
+    }
+    /// Recover a live terminal without sending input or restarting its process.
+    fn reset_terminal_pane(&mut self, pane_id: PaneId) -> Result<()> {
+        let PaneId::Terminal(terminal_id) = pane_id else {
+            return Ok(());
+        };
+        let Some(pane) = self.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        // Held panes have no live PTY; keep their rerun/startup UI intact.
+        if pane.is_held() {
+            return Ok(());
+        }
+        pane.reset_terminal();
+        self.pending_vte_events.remove(&terminal_id);
+        self.set_force_render();
+        // Keep emulator recovery even if the process exited before this ioctl.
+        self.os_api.reset_terminal(terminal_id)
     }
     pub fn dump_active_terminal_screen(
         &mut self,

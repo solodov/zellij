@@ -55,6 +55,9 @@ impl ServerOsApi for FakeInputOutput {
     fn write_to_tty_stdin(&self, _id: u32, _buf: &[u8]) -> Result<usize> {
         unimplemented!()
     }
+    fn reset_terminal(&self, _id: u32) -> Result<()> {
+        Ok(())
+    }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
     }

@@ -129,6 +129,9 @@ impl ServerOsApi for FakeServerOsApi {
             Err(anyhow!("no fake pty for terminal id {terminal_id}"))
         }
     }
+    fn reset_terminal(&self, _terminal_id: u32) -> Result<()> {
+        Ok(())
+    }
     fn tcdrain(&self, _terminal_id: u32) -> Result<()> {
         Ok(())
     }

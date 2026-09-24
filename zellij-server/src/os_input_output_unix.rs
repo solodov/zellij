@@ -401,6 +401,46 @@ impl UnixPtyBackend {
         try_write_to_fd(fd, buf).with_context(err_context)
     }
 
+    /// Restore cooked input, echo, signal keys and newline handling without draining output.
+    pub fn reset_terminal(&self, terminal_id: u32) -> Result<()> {
+        use termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags, SpecialCharacterIndices::*};
+
+        let terminals = self.terminal_id_to_raw_fd.lock().to_anyhow()?;
+        let fd = terminals
+            .get(&terminal_id)
+            .and_then(|fd| *fd)
+            .with_context(|| format!("no live PTY for terminal {terminal_id}"))?;
+        // Keep the map locked so the descriptor cannot be retired during recovery.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        let mut attrs = termios::tcgetattr(fd)?;
+        attrs.input_flags.remove(
+            InputFlags::IGNBRK | InputFlags::IGNPAR | InputFlags::PARMRK | InputFlags::INPCK
+                | InputFlags::ISTRIP | InputFlags::INLCR | InputFlags::IGNCR
+                | InputFlags::IXOFF | InputFlags::IXANY,
+        );
+        attrs.input_flags.insert(InputFlags::BRKINT | InputFlags::ICRNL | InputFlags::IXON);
+        attrs.output_flags = OutputFlags::OPOST | OutputFlags::ONLCR;
+        attrs.control_flags.remove(ControlFlags::CSIZE | ControlFlags::PARENB | ControlFlags::PARODD);
+        attrs.control_flags.insert(ControlFlags::CS8 | ControlFlags::CREAD);
+        attrs.local_flags = LocalFlags::ISIG | LocalFlags::ICANON | LocalFlags::IEXTEN
+            | LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK
+            | LocalFlags::ECHOCTL | LocalFlags::ECHOKE;
+        for (index, value) in [
+            (VINTR, 3), (VQUIT, 28), (VERASE, 127), (VKILL, 21), (VEOF, 4),
+            (VSTART, 17), (VSTOP, 19), (VSUSP, 26), (VREPRINT, 18),
+            (VWERASE, 23), (VLNEXT, 22), (VDISCARD, 15), (VMIN, 1), (VTIME, 0),
+        ] {
+            attrs.control_chars[index as usize] = value;
+        }
+        attrs.control_chars[VEOL as usize] = libc::_POSIX_VDISABLE;
+        attrs.control_chars[VEOL2 as usize] = libc::_POSIX_VDISABLE;
+        termios::tcsetattr(fd, termios::SetArg::TCSANOW, &attrs)
+            .with_context(|| format!("failed to reset terminal {terminal_id}"))?;
+        // Resume output stopped by Ctrl-S; do not wait for a stuck process to drain it.
+        termios::tcflow(fd, termios::FlowArg::TCOON)
+            .with_context(|| format!("failed to resume terminal {terminal_id}"))
+    }
+
     pub fn tcdrain(&self, terminal_id: u32) -> Result<()> {
         let err_context = || format!("failed to tcdrain to TTY ID {}", terminal_id);
 
@@ -470,6 +510,47 @@ mod tests {
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use nix::sys::termios;
     use std::io::Read;
+
+    #[test]
+    fn reset_terminal_restores_cooked_pty_settings_without_affecting_other_ptys() {
+        use termios::{InputFlags, LocalFlags, OutputFlags, SpecialCharacterIndices::*};
+
+        let target = openpty(None, &None).unwrap();
+        let other = openpty(None, &None).unwrap();
+        for pty in [&target, &other] {
+            let mut attrs = termios::tcgetattr(&pty.slave).unwrap();
+            termios::cfmakeraw(&mut attrs);
+            attrs.control_chars[VINTR as usize] = 0;
+            attrs.control_chars[VERASE as usize] = 0;
+            termios::tcsetattr(&pty.slave, termios::SetArg::TCSANOW, &attrs).unwrap();
+        }
+        let other_before = termios::tcgetattr(&other.slave).unwrap();
+        let backend = UnixPtyBackend {
+            orig_termios: Arc::new(Mutex::new(None)),
+            terminal_id_to_raw_fd: Arc::new(Mutex::new(BTreeMap::from([
+                (1, Some(target.master.as_raw_fd())),
+                (2, Some(other.master.as_raw_fd())),
+                (3, None),
+            ]))),
+            next_terminal_id_counter: Arc::new(AtomicU32::new(4)),
+        };
+        backend.reset_terminal(1).unwrap();
+        let attrs = termios::tcgetattr(&target.slave).unwrap();
+        assert!(attrs.local_flags.contains(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG));
+        assert!(attrs.input_flags.contains(InputFlags::ICRNL));
+        assert!(attrs.output_flags.contains(OutputFlags::OPOST | OutputFlags::ONLCR));
+        assert_eq!(attrs.control_chars[VINTR as usize], 3);
+        assert_eq!(attrs.control_chars[VERASE as usize], 127);
+        assert_eq!(attrs.control_chars[VMIN as usize], 1);
+        assert_eq!(attrs.control_chars[VTIME as usize], 0);
+        assert_eq!(termios::tcgetattr(&other.slave).unwrap(), other_before);
+        // Recovery must not type a command (or even a newline) into the application.
+        fcntl(&target.slave, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        let mut input = [0; 16];
+        assert_eq!(unistd::read(&target.slave, &mut input), Err(nix::errno::Errno::EAGAIN));
+        assert!(backend.reset_terminal(3).is_err());
+        assert!(backend.reset_terminal(999).is_err());
+    }
 
     /// Verify that `try_write_to_fd` writes as many bytes as the kernel will
     /// accept in one pass and returns a partial count (not an error) when the

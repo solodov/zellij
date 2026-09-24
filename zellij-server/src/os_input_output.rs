@@ -321,6 +321,8 @@ pub trait ServerOsApi: Send + Sync {
     }
     /// Write bytes to the standard input of the virtual terminal referred to by `terminal_id`.
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize>;
+    /// Restore sane PTY input/output settings without sending input or restarting the process.
+    fn reset_terminal(&self, terminal_id: u32) -> Result<()>;
     /// Wait until all output written to the terminal has been transmitted.
     fn tcdrain(&self, terminal_id: u32) -> Result<()>;
     /// Terminate the process with process ID `pid`. (SIGHUP)
@@ -429,6 +431,9 @@ impl ServerOsApi for ServerOsInputOutput {
     }
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize> {
         self.pty_backend.write_to_tty_stdin(terminal_id, buf)
+    }
+    fn reset_terminal(&self, terminal_id: u32) -> Result<()> {
+        self.pty_backend.reset_terminal(terminal_id)
     }
     fn tcdrain(&self, terminal_id: u32) -> Result<()> {
         self.pty_backend.tcdrain(terminal_id)

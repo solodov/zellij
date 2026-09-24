@@ -604,6 +604,11 @@ impl WindowsPtyBackend {
         }
     }
 
+    /// ConPTY has no POSIX line discipline to reset; recovery resets only the emulator.
+    pub fn reset_terminal(&self, _terminal_id: u32) -> Result<()> {
+        Ok(())
+    }
+
     pub fn tcdrain(&self, terminal_id: u32) -> Result<()> {
         let err_context = || format!("failed to drain terminal {}", terminal_id);
 

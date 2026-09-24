@@ -741,6 +741,16 @@ impl Pane for TerminalPane {
     fn clear_screen(&mut self) {
         self.grid.clear_screen()
     }
+    /// Recover from unfinished escape sequences as well as damaged terminal modes.
+    fn reset_terminal(&mut self) {
+        self.vte_parser = vte::Parser::new();
+        self.kitty_interceptor.reset();
+        self.pending_pty_input.clear();
+        self.forward_paused = false;
+        self.search_term.clear();
+        self.grid.reset_for_recovery();
+        self.set_should_render(true);
+    }
     fn scroll_up(&mut self, count: usize, _client_id: ClientId) {
         self.grid.move_viewport_up(count);
         self.set_should_render(true);
@@ -1716,6 +1726,10 @@ mod grid_tests;
 #[cfg(test)]
 #[path = "./unit/terminal_pane_resurrection_tests.rs"]
 mod resurrection_tests;
+
+#[cfg(test)]
+#[path = "./unit/terminal_pane_reset_tests.rs"]
+mod reset_tests;
 
 #[cfg(test)]
 #[path = "./unit/search_in_pane_tests.rs"]

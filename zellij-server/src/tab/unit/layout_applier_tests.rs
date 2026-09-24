@@ -55,6 +55,9 @@ impl ServerOsApi for FakeInputOutput {
         unimplemented!()
     }
 
+    fn reset_terminal(&self, _id: u32) -> Result<()> {
+        Ok(())
+    }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
     }

@@ -223,6 +223,9 @@ impl ServerOsApi for FakeInputOutput {
             .extend_from_slice(buf);
         Ok(buf.len())
     }
+    fn reset_terminal(&self, _id: u32) -> Result<()> {
+        Ok(())
+    }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
     }
