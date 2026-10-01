@@ -54,15 +54,16 @@ fn programmatic_rerun_preserves_restored_history_once() {
 #[test]
 fn banner_redraws_and_saves_do_not_overwrite_restored_contents() {
     let mut pane = restored_pane();
-    let saved_contents = pane.serialize(Some(0)).unwrap();
+    let saved_contents = pane.serialize(true, Some(0)).unwrap();
+    assert!(saved_contents.contains("history 00"));
     for columns in [60, 100, 80] {
         let mut geom = pane.geom;
         geom.cols.set_inner(columns);
         pane.set_geom(geom);
         pane.update_theme(Style::default().colors);
         assert!(pane.grid.dump_screen(false).contains("Waiting to run:"));
-        assert_eq!(pane.serialize(Some(0)).unwrap(), saved_contents);
-        assert!(pane.grid.dump_screen(true).contains("history 00"));
+        assert_eq!(pane.serialize(true, Some(0)).unwrap(), saved_contents);
+        assert!(!pane.grid.dump_screen(true).contains("history"));
     }
     press_key(&mut pane, BareKey::Esc);
     assert_restored_history(&pane);
@@ -75,7 +76,7 @@ fn explicit_terminal_reset_after_startup_still_clears_history() {
     assert_restored_history(&pane);
     pane.handle_pty_bytes(b"\x1bc".to_vec());
     assert!(!pane.grid.dump_screen(true).contains("history"));
-    assert!(!pane.serialize(Some(0)).unwrap().contains("history"));
+    assert!(!pane.serialize(true, Some(0)).unwrap().contains("history"));
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn unheld_initial_contents_are_not_retained_for_later_replay() {
     assert!(pane.grid.dump_screen(false).contains("INITIAL OUTPUT"));
     assert!(pane.initial_contents.is_none());
     pane.handle_pty_bytes(b"\x1bcLIVE OUTPUT".to_vec());
-    let saved_contents = pane.serialize(Some(0)).unwrap();
+    let saved_contents = pane.serialize(true, Some(0)).unwrap();
     assert!(saved_contents.contains("LIVE OUTPUT"));
     assert!(!saved_contents.contains("INITIAL OUTPUT"));
 }
@@ -111,7 +112,7 @@ fn serialize_osc133_restores_history_with_one_fresh_prompt_after_either_startup_
         source.handle_pty_bytes(
             b"\x1b]133;A\x07old$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\noutput\x1b]133;D;0\x07\r\n\x1b]133;A\x07prompt$ \x1b]133;B\x07".to_vec(),
         );
-        let saved_contents = source.serialize(Some(0)).unwrap();
+        let saved_contents = source.serialize(true, Some(0)).unwrap();
         assert!(source.grid.dump_screen(true).contains("prompt$"));
 
         let mut pane = new_pane();
@@ -124,6 +125,94 @@ fn serialize_osc133_restores_history_with_one_fresh_prompt_after_either_startup_
         assert!(contents.contains("output"));
         assert_eq!(contents.matches("prompt$").count(), 1);
     }
+}
+
+#[test]
+fn saved_titles_survive_startup_choices_and_remain_dynamic() {
+    for serialize_viewport in [false, true] {
+        for key in [BareKey::Enter, BareKey::Esc] {
+            let mut source = new_pane();
+            source.handle_pty_bytes(b"PRIVATE OUTPUT\r\n".to_vec());
+            source.handle_pty_bytes(
+                "\x1b]2;project 日本; feature-branch\x1b\\"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            let saved_contents = source.serialize(serialize_viewport, Some(0)).unwrap();
+            assert_eq!(
+                saved_contents.contains("PRIVATE OUTPUT"),
+                serialize_viewport
+            );
+
+            let mut pane = new_pane();
+            pane.set_title("runner --resume".to_owned());
+            pane.restore_initial_contents(&saved_contents, true);
+            pane.hold(None, true, RunCommand::default());
+            assert_eq!(pane.current_title(), "project 日本; feature-branch");
+            assert_eq!(pane.custom_title(), None);
+            assert_eq!(pane.stack_list_entry_label(), pane.current_title());
+            assert!(pane.grid.dump_screen(false).contains("Waiting to run:"));
+            assert!(!pane.grid.dump_screen(false).contains("PRIVATE OUTPUT"));
+
+            let mut geom = pane.geom;
+            geom.cols.set_inner(100);
+            pane.set_geom(geom);
+            pane.update_theme(Style::default().colors);
+            assert_eq!(pane.current_title(), "project 日本; feature-branch");
+            assert_eq!(
+                pane.serialize(serialize_viewport, Some(0)).unwrap(),
+                saved_contents
+            );
+
+            assert!(press_key(&mut pane, key).is_some());
+            assert_eq!(pane.current_title(), "project 日本; feature-branch");
+            assert_eq!(
+                pane.grid.dump_screen(true).contains("PRIVATE OUTPUT"),
+                serialize_viewport
+            );
+            if !serialize_viewport {
+                assert_eq!(pane.cursor_coordinates().unwrap().0, 0);
+                assert_eq!(pane.cursor_coordinates().unwrap().1, 0);
+            }
+            pane.handle_pty_bytes(b"\x1b]0;new live title\x07".to_vec());
+            assert_eq!(pane.current_title(), "new live title");
+        }
+    }
+}
+
+#[test]
+fn saved_titles_preserve_fallbacks_and_do_not_override_explicit_names() {
+    let mut source = new_pane();
+    source.set_title("previous command".to_owned());
+    let fallback_contents = source.serialize(false, None).unwrap();
+    let mut pane = new_pane();
+    pane.set_title("restored command".to_owned());
+    pane.restore_initial_contents(&fallback_contents, false);
+    assert_eq!(pane.current_title(), "previous command");
+
+    source.handle_pty_bytes(b"\x1b]2;application title\x07".to_vec());
+    source.rename(b"explicit name".to_vec());
+    let saved_contents = source.serialize(false, None).unwrap();
+    pane.rename(source.custom_title().unwrap().into_bytes());
+    pane.restore_initial_contents(&saved_contents, true);
+    pane.hold(None, true, RunCommand::default());
+    assert_eq!(pane.current_title(), "explicit name");
+    pane.handle_pty_bytes(b"\x1b]2;new application title\x07".to_vec());
+    assert_eq!(pane.current_title(), "explicit name");
+    pane.rename(vec![]);
+    assert_eq!(pane.current_title(), "new application title");
+}
+
+#[test]
+fn saved_titles_cannot_inject_terminal_instructions() {
+    let mut source = new_pane();
+    source.grid.title = Some("project\x1b\x07\n\r\u{009c}name".to_owned());
+    let saved_contents = source.serialize(false, None).unwrap();
+    assert_eq!(saved_contents, "\x1b]2;projectname\x1b\\");
+    let mut pane = new_pane();
+    pane.restore_initial_contents(&saved_contents, false);
+    assert_eq!(pane.current_title(), "projectname");
+    assert_eq!(pane.cursor_coordinates().unwrap().1, 0);
 }
 
 fn press_key(pane: &mut TerminalPane, key: BareKey) -> Option<AdjustedInput> {
@@ -146,7 +235,7 @@ fn restored_pane() -> TerminalPane {
     for line in 0..40 {
         source.handle_pty_bytes(format!("\x1b[31mhistory {line:02}\x1b[0m\r\n").into_bytes());
     }
-    let contents = source.serialize(Some(0)).unwrap();
+    let contents = source.serialize(true, Some(0)).unwrap();
     let mut pane = new_pane();
     pane.restore_initial_contents(&contents, true);
     pane.hold(None, true, RunCommand::default());

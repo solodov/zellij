@@ -100,7 +100,7 @@ use crate::{
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction, PluginRenderAsset},
     pty::{get_default_shell, ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
     pty_writer::PtyWriteInstruction,
-    tab::{GuestChoiceIndicator, SuppressedPanes, Tab},
+    tab::{GuestChoiceIndicator, Pane, SuppressedPanes, Tab},
     thread_bus::Bus,
     ui::loading_indication::LoadingIndication,
     ClientId, ServerInstruction,
@@ -6509,7 +6509,7 @@ impl Screen {
     fn dump_layout_to_hd(&mut self) -> Result<()> {
         let err_context = || format!("Failed to log and report session state");
         let session_layout_metadata =
-            self.get_layout_metadata(Some(self.default_shell.clone()), None);
+            self.get_layout_metadata(Some(self.default_shell.clone()), None, true);
         self.bus
             .senders
             .send_to_plugin(PluginInstruction::LogLayoutToHd(session_layout_metadata))
@@ -8309,11 +8309,23 @@ impl Screen {
         }
         Ok(())
     }
+    /// Captures pane titles for session saves even when viewport saving is disabled.
     fn get_layout_metadata(
         &self,
         default_shell: Option<PathBuf>,
         tab_index: Option<usize>,
+        serialize_titles: bool,
     ) -> SessionLayoutMetadata {
+        let serialize_pane_contents = |pane: &dyn Pane| {
+            if self.serialize_pane_viewport || serialize_titles {
+                pane.serialize(
+                    self.serialize_pane_viewport,
+                    self.scrollback_lines_to_serialize,
+                )
+            } else {
+                None
+            }
+        };
         let mut session_layout_metadata = SessionLayoutMetadata::new(self.default_layout.clone());
         if let Some(default_shell) = default_shell {
             session_layout_metadata.update_default_shell(default_shell);
@@ -8392,11 +8404,7 @@ impl Screen {
                         p.invoked_with().clone(),
                         p.custom_title(),
                         !focused_clients.is_empty(),
-                        if self.serialize_pane_viewport {
-                            p.serialize(self.scrollback_lines_to_serialize)
-                        } else {
-                            None
-                        },
+                        serialize_pane_contents(p.as_ref()),
                         focused_clients,
                         default_fg,
                         default_bg,
@@ -8433,11 +8441,7 @@ impl Screen {
                         p.invoked_with().clone(),
                         p.custom_title(),
                         !focused_clients.is_empty(),
-                        if self.serialize_pane_viewport {
-                            p.serialize(self.scrollback_lines_to_serialize)
-                        } else {
-                            None
-                        },
+                        serialize_pane_contents(p.as_ref()),
                         focused_clients,
                         default_fg,
                         default_bg,
@@ -9977,7 +9981,8 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::DumpLayout(default_shell, client_id, completion_tx) => {
                 let err_context = || format!("Failed to dump layout");
-                let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                let session_layout_metadata =
+                    screen.get_layout_metadata(default_shell, None, false);
                 screen
                     .bus
                     .senders
@@ -9990,7 +9995,8 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::ListClientsMetadata(default_shell, client_id, completion_tx) => {
                 let err_context = || format!("Failed to dump layout");
-                let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                let session_layout_metadata =
+                    screen.get_layout_metadata(default_shell, None, false);
                 screen
                     .bus
                     .senders
@@ -10037,8 +10043,11 @@ pub(crate) fn screen_thread_main(
                 response_channel,
             } => {
                 let err_context = || format!("Failed to dump layout");
-                let session_layout_metadata =
-                    screen.get_layout_metadata(Some(screen.default_shell.clone()), tab_index);
+                let session_layout_metadata = screen.get_layout_metadata(
+                    Some(screen.default_shell.clone()),
+                    tab_index,
+                    false,
+                );
                 screen
                     .bus
                     .senders
@@ -10089,7 +10098,7 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::ListClientsToPlugin(plugin_id, client_id) => {
                 let err_context = || format!("Failed to dump layout");
                 let session_layout_metadata =
-                    screen.get_layout_metadata(Some(screen.default_shell.clone()), None);
+                    screen.get_layout_metadata(Some(screen.default_shell.clone()), None, false);
                 screen
                     .bus
                     .senders
@@ -12439,7 +12448,7 @@ pub(crate) fn screen_thread_main(
                 };
 
                 let session_layout_metadata = if screen.session_serialization {
-                    screen.get_layout_metadata(Some(screen.default_shell.clone()), None)
+                    screen.get_layout_metadata(Some(screen.default_shell.clone()), None, true)
                 } else {
                     // Create empty metadata if serialization is disabled
                     SessionLayoutMetadata::new(screen.default_layout.clone())

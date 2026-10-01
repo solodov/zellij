@@ -824,7 +824,12 @@ pub trait Pane {
         None
     }
     fn rename(&mut self, _buf: Vec<u8>) {}
-    fn serialize(&self, _scrollback_lines_to_serialize: Option<usize>) -> Option<String> {
+    /// Serializes a terminal title and, when enabled, saved output for resurrection.
+    fn serialize(
+        &self,
+        _serialize_pane_viewport: bool,
+        _scrollback_lines_to_serialize: Option<usize>,
+    ) -> Option<String> {
         None
     }
     fn rerun(&mut self) -> Option<RunCommand> {

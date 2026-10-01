@@ -1261,10 +1261,31 @@ impl Pane for TerminalPane {
         self.pane_name = String::from_utf8_lossy(&buf).to_string();
         self.set_should_render(true);
     }
-    fn serialize(&self, scrollback_lines_to_serialize: Option<usize>) -> Option<String> {
-        self.initial_contents
-            .clone()
-            .or_else(|| self.grid.serialize(scrollback_lines_to_serialize))
+    fn serialize(
+        &self,
+        serialize_pane_viewport: bool,
+        scrollback_lines_to_serialize: Option<usize>,
+    ) -> Option<String> {
+        let contents = if serialize_pane_viewport {
+            self.initial_contents
+                .as_deref()
+                .map(|contents| contents_without_initial_title(contents).to_owned())
+                .or_else(|| self.grid.serialize(scrollback_lines_to_serialize))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        // Replay an OSC title instead of a permanent pane rename. Strip controls so the
+        // title cannot terminate the OSC and inject terminal instructions into the save.
+        let title: String = self
+            .grid
+            .title
+            .as_deref()
+            .unwrap_or(&self.pane_title)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        Some(format!("\x1b]2;{title}\x1b\\{contents}"))
     }
     fn rerun(&mut self) -> Option<RunCommand> {
         // if this is a command pane that has exited or is waiting to be rerun, will return its
@@ -1515,10 +1536,12 @@ impl TerminalPane {
             kitty_interceptor: KittyApcInterceptor::new(),
         }
     }
-    /// Loads saved output, retaining it through the startup banner only for held panes.
+    /// Loads saved title/output, retaining it through the startup banner only for held panes.
     pub fn restore_initial_contents(&mut self, contents: &str, hold_for_command: bool) {
         self.handle_pty_bytes(contents.as_bytes().into());
-        self.handle_pty_bytes(b"\n\r".to_vec());
+        if !contents_without_initial_title(contents).is_empty() {
+            self.handle_pty_bytes(b"\n\r".to_vec());
+        }
         if hold_for_command {
             self.initial_contents = Some(contents.to_owned());
         }
@@ -1568,10 +1591,10 @@ impl TerminalPane {
         }
         self.grid.cursor_coordinates()
     }
+    /// Draws startup instructions without replaying saved output behind the banner.
     fn render_first_run_banner(&mut self) {
-        if let Some(contents) = self.initial_contents.clone() {
+        if self.initial_contents.is_some() {
             self.grid.reset_terminal_state();
-            self.restore_initial_contents(&contents, false);
         }
         let columns = self.get_content_columns();
         let rows = self.get_content_rows();
@@ -1717,6 +1740,15 @@ impl TerminalPane {
             AdjustedInput::DropToShellInThisPane { working_dir }
         })
     }
+}
+
+/// Separates the saved OSC 2 title from output so title-only restores do not add a blank line.
+fn contents_without_initial_title(contents: &str) -> &str {
+    contents
+        .strip_prefix("\x1b]2;")
+        .and_then(|contents| contents.split_once("\x1b\\"))
+        .map(|(_, output)| output)
+        .unwrap_or(contents)
 }
 
 #[cfg(test)]

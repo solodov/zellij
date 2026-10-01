@@ -4,6 +4,7 @@ use insta::assert_snapshot;
 use zellij_integration_tests::{
     keys, normalized, LayoutInfo, TestRunner, TestSession, PROMPT, TERMINAL_SIZE,
 };
+use zellij_utils::input::command::TerminalAction;
 
 const RESURRECT_LAYOUT: &str = r#"
 layout {
@@ -92,6 +93,67 @@ fn quitting_session_saves_final_resurrection_state_without_waiting_for_interval(
         |grid_snapshot| grid_snapshot.contains("│") && grid_snapshot.status_bar_appears(),
     );
     zellij.quit();
+}
+
+#[test]
+fn quitting_saves_floating_titles_independently_of_the_viewport() {
+    let layout = r#"
+        layout {
+            pane
+            floating_panes {
+                pane command="floating-command"
+            }
+        }
+    "#;
+    for serialize_viewport in [false, true] {
+        let mut zellij = TestRunner::new(TERMINAL_SIZE)
+            .with_config(&format!(
+                "session_serialization true\nserialization_interval 1000\nserialize_pane_viewport {serialize_viewport}"
+            ))
+            .with_layout(LayoutInfo::Stringified(layout.to_owned()))
+            .start();
+        for _ in 0..2 {
+            let terminal = zellij.expect_pty_spawn();
+            match terminal.terminal_action() {
+                Some(TerminalAction::RunCommand(command))
+                    if command
+                        .command
+                        .to_string_lossy()
+                        .contains("floating-command") =>
+                {
+                    terminal.output(b"PRIVATE FLOATING OUTPUT\r\n\x1b]2;floating project\x07");
+                },
+                _ => terminal.output(PROMPT),
+            }
+        }
+        zellij.wait_until("floating title rendered before shutdown", |grid| {
+            grid.contains("floating project") && grid.contains("PRIVATE FLOATING OUTPUT")
+        });
+        zellij.quit();
+
+        zellij.resurrect(TERMINAL_SIZE);
+        let terminals = [zellij.expect_pty_spawn(), zellij.expect_pty_spawn()];
+        let floating = terminals
+            .iter()
+            .find(|terminal| terminal.terminal_action().is_none())
+            .expect("restored command is held until startup choice");
+        zellij.wait_until("saved floating title shown while waiting to run", |grid| {
+            grid.contains("floating project")
+                && grid.contains("Waiting to run: floating-command")
+                && !grid.contains("PRIVATE FLOATING OUTPUT")
+        });
+        zellij.send_stdin(&keys::ESC);
+        zellij.wait_until("floating pane dropped to shell", |grid| {
+            floating.terminal_action().is_some()
+                && !grid.contains("Waiting to run:")
+                && grid.contains("PRIVATE FLOATING OUTPUT") == serialize_viewport
+        });
+        floating.output(b"\x1b]2;new floating title\x07");
+        zellij.wait_until("live title replaced saved floating title", |grid| {
+            grid.contains("new floating title") && !grid.contains("floating project")
+        });
+        zellij.quit();
+    }
 }
 
 #[test]

@@ -321,14 +321,12 @@ fn serialize_pane_title_and_attributes(
             .push(KdlEntry::new_prop("focus", KdlValue::Bool(true)));
     }
     if let Some(initial_pane_contents) = initial_pane_contents.as_ref() {
-        if command.is_none() && edit.is_none() {
-            let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
-            kdl_node
-                .entries_mut()
-                .push(KdlEntry::new_prop("contents_file", file_name.clone()));
+        let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
+        kdl_node
+            .entries_mut()
+            .push(KdlEntry::new_prop("contents_file", file_name.clone()));
 
-            pane_contents.insert(file_name, initial_pane_contents.clone());
-        }
+        pane_contents.insert(file_name, initial_pane_contents.clone());
     }
 }
 
@@ -2346,6 +2344,42 @@ mod tests {
         };
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         assert_snapshot!(kdl.0);
+    }
+
+    #[test]
+    fn saved_contents_include_command_and_editor_panes() {
+        for run in [
+            Run::Command(crate::input::command::RunCommand::new(PathBuf::from(
+                "runner",
+            ))),
+            Run::EditFile(PathBuf::from("file.txt"), None, None),
+        ] {
+            let contents = "\x1b]2;previous title\x1b\\".to_owned();
+            let tiled = TiledPaneLayout {
+                run: Some(run.clone()),
+                pane_initial_contents: Some(contents.clone()),
+                ..Default::default()
+            };
+            let floating = FloatingPaneLayout {
+                run: Some(run),
+                pane_initial_contents: Some(contents.clone()),
+                ..Default::default()
+            };
+            let mut files = BTreeMap::new();
+            for node in [
+                serialize_tiled_pane(&tiled, false, &mut files),
+                serialize_floating_pane(&floating, &mut files),
+            ] {
+                let file_name = node
+                    .get("contents_file")
+                    .unwrap()
+                    .value()
+                    .as_string()
+                    .unwrap();
+                assert_eq!(files.get(file_name), Some(&contents));
+            }
+            assert_eq!(files.len(), 2);
+        }
     }
 
     // utility functions

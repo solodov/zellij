@@ -742,6 +742,50 @@ fn moving_the_visible_member_reorders_the_list() {
 }
 
 #[test]
+fn stack_titles_survive_resurrection_without_saving_the_viewport() {
+    let mut zellij = TestRunner::new(TERMINAL_SIZE)
+        .with_config("session_serialization true\nserialize_pane_viewport false")
+        .with_layout(LayoutInfo::Stringified(
+            STACK_WITH_COMMAND_MEMBER_LAYOUT.to_owned(),
+        ))
+        .start();
+    for _ in 0..2 {
+        let member = zellij.expect_pty_spawn();
+        let title = match member.terminal_action() {
+            Some(TerminalAction::RunCommand(command))
+                if command.command.to_string_lossy().contains("member-command") =>
+            {
+                "command project"
+            },
+            _ => "shell project",
+        };
+        member.output(format!("PRIVATE OUTPUT\r\n\x1b]2;{title}\x1b\\").as_bytes());
+    }
+    zellij.wait_until("shell and command titles rendered in the stack", |grid| {
+        grid.status_bar_appears()
+            && grid.contains("shell project")
+            && grid.contains("command project")
+    });
+    zellij.save_session();
+    zellij.wait_for_serialized_session();
+    zellij.quit();
+
+    zellij.resurrect(TERMINAL_SIZE);
+    zellij.wait_until("both stack titles restored", |grid| {
+        grid.status_bar_appears()
+            && grid.contains("shell project")
+            && grid.contains("command project")
+            && !grid.contains("PRIVATE OUTPUT")
+    });
+    zellij.send_stdin(&keys::alt('j'));
+    zellij.wait_until("command member selected with its saved title", |grid| {
+        grid.contains(&selected_entry("command project"))
+            && grid.contains("Waiting to run: member-command")
+    });
+    zellij.quit();
+}
+
+#[test]
 fn a_stack_list_survives_session_resurrection() {
     let mut zellij = TestRunner::new(TERMINAL_SIZE)
         .with_config("session_serialization true")
